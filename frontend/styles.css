@@ -741,3 +741,32 @@ th {
 .prompt-path-row {
   grid-template-columns: 30px minmax(0, 1fr) auto auto;
 }
+
+.task-msg {
+  font-size: 11px;
+}
+
+.task-error {
+  margin-top: 4px;
+  padding: 4px 6px;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 4px;
+  color: #b42318;
+  font-size: 11px;
+  word-break: break-all;
+  max-width: 280px;
+}
+
+tr.task-active {
+  background: #fffbeb;
+}
+
+tr.task-active .status {
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}

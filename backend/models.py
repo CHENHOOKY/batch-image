@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from typing import Any, Literal
 
@@ -11,6 +11,7 @@ class SettingsUpdate(BaseModel):
     model: str | None = None
     aspect_ratio: str | None = None
     quality: str | None = None
+    image_size: str | None = None
     concurrency: int | None = Field(default=None, ge=1, le=10)
     poll_interval_sec: float | None = Field(default=None, ge=1, le=60)
     poll_timeout_sec: int | None = Field(default=None, ge=30, le=3600)
@@ -43,54 +44,13 @@ class BatchJobCreate(BaseModel):
     model: str | None = None
     aspect_ratio: str | None = None
     quality: str | None = None
+    image_size: str | None = None
     concurrency: int | None = Field(default=None, ge=1, le=10)
     poll_interval_sec: float | None = Field(default=None, ge=1, le=60)
     prompts: list[PromptItem] = Field(..., min_length=1, max_length=10)
     image_extensions: list[str] = Field(
         default_factory=lambda: [".jpg", ".jpeg", ".png", ".webp", ".bmp"]
     )
-
-
-class JobTaskView(BaseModel):
-    id: str
-    image_name: str
-    prompt_name: str
-    prompt: str
-    status: Literal[
-        "pending",
-        "uploading",
-        "submitting",
-        "processing",
-        "downloading",
-        "success",
-        "failed",
-        "cancelled",
-    ]
-    message: str = ""
-    remote_task_id: str | None = None
-    output_path: str | None = None
-    result_url: str | None = None
-
-
-class JobView(BaseModel):
-    id: str
-    status: Literal["queued", "running", "completed", "failed", "cancelled"]
-    created_at: str
-    started_at: str | None = None
-    finished_at: str | None = None
-    source_dir: str
-    output_dir: str
-    model: str
-    aspect_ratio: str
-    quality: str
-    concurrency: int
-    total: int
-    success: int
-    failed: int
-    cancelled: int = 0
-    pending: int
-    message: str = ""
-    tasks: list[JobTaskView] = Field(default_factory=list)
 
 
 class ApiResponse(BaseModel):

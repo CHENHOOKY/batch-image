@@ -1,26 +1,11 @@
 const state = {
   options: {
     models: [
-      { id: "gpt-image-2", name: "gpt-image-2" },
-      { id: "gpt-image-2-vip", name: "gpt-image-2-vip" },
-    ],
-    aspect_ratios: [
-      "auto",
-      "1:1",
-      "3:2",
-      "2:3",
-      "16:9",
-      "9:16",
-      "5:4",
-      "4:5",
-      "4:3",
-      "3:4",
-      "21:9",
-      "9:21",
-      "1:3",
-      "3:1",
-      "2:1",
-      "1:2",
+      { id: "gpt-image-2", name: "gpt-image-2", aspect_ratios: ["1:1","16:9","9:16","4:3","3:4","3:2","2:3","5:4","4:5","21:9","9:21","1:2","2:1"], image_sizes: [], supports_quality: true },
+      { id: "nano-banana-2", name: "nano-banana-2", aspect_ratios: ["auto","1:1","16:9","9:16","4:3","3:4","3:2","2:3","5:4","4:5","21:9","1:4","4:1","1:8","8:1"], image_sizes: ["1K","2K","4K"], supports_quality: false },
+      { id: "nano-banana-pro", name: "nano-banana-pro", aspect_ratios: ["auto","1:1","16:9","9:16","4:3","3:4","3:2","2:3","5:4","4:5","21:9"], image_sizes: ["1K","2K","4K"], supports_quality: false },
+      { id: "nano-banana-fast", name: "nano-banana-fast", aspect_ratios: ["auto","1:1","16:9","9:16","4:3","3:4","3:2","2:3","5:4","4:5","21:9"], image_sizes: ["1K"], supports_quality: false },
+      { id: "nano-banana", name: "nano-banana", aspect_ratios: ["auto","1:1","16:9","9:16","4:3","3:4","3:2","2:3","5:4","4:5","21:9"], image_sizes: [], supports_quality: false },
     ],
     qualities: ["auto", "low", "medium", "high"],
   },
@@ -54,6 +39,9 @@ const el = {
   taskTbody: document.getElementById("task-tbody"),
   btnStart: document.getElementById("btn-start"),
   btnCancel: document.getElementById("btn-cancel"),
+  btnDelete: document.getElementById("btn-delete-job"),
+  imageSize: document.getElementById("image-size"),
+  settingsImageSize: document.getElementById("settings-image-size"),
   settingsModal: document.getElementById("settings-modal"),
   apiKey: document.getElementById("api-key"),
   apiKeyHint: document.getElementById("api-key-hint"),
@@ -112,7 +100,67 @@ async function api(path, options = {}) {
   return payload;
 }
 
-function fillSelect(select, values, selected) {
+
+function getModelInfo(modelId) {
+  const models = state.options.models || [];
+  return models.find((m) => m.id === modelId) || models[0] || { id: modelId, aspect_ratios: ["1:1"], image_sizes: [], supports_quality: true };
+}
+
+function updateModelDependentOptions(selectModelEl, selectRatioEl, selectSizeEl, currentRatio, currentSize, selectQualityEl) {
+  const modelId = selectModelEl.value;
+  const info = getModelInfo(modelId);
+  const ratios = info.aspect_ratios || ["1:1"];
+  const sizes = info.image_sizes || [];
+  const supportsQuality = info.supports_quality !== false;
+
+  // Show/hide quality dropdown based on model
+  if (selectQualityEl) {
+    if (supportsQuality) {
+      selectQualityEl.closest(".field").style.display = "";
+    } else {
+      selectQualityEl.closest(".field").style.display = "none";
+    }
+  }
+
+  // Fill aspect ratios
+  selectRatioEl.innerHTML = "";
+  ratios.forEach((r) => {
+    const opt = document.createElement("option");
+    opt.value = r;
+    opt.textContent = r;
+    selectRatioEl.appendChild(opt);
+  });
+  if (currentRatio && ratios.includes(currentRatio)) {
+    selectRatioEl.value = currentRatio;
+  } else {
+    selectRatioEl.value = ratios[0] || "1:1";
+  }
+
+  // Fill image sizes
+  selectSizeEl.innerHTML = "";
+  if (sizes.length === 0) {
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = "\u4e0d\u9002\u7528";
+    selectSizeEl.appendChild(opt);
+    selectSizeEl.disabled = true;
+  } else {
+    selectSizeEl.disabled = false;
+    sizes.forEach((s) => {
+      const opt = document.createElement("option");
+      opt.value = s;
+      opt.textContent = s;
+      selectSizeEl.appendChild(opt);
+    });
+    if (currentSize && sizes.includes(currentSize)) {
+      selectSizeEl.value = currentSize;
+    } else {
+      selectSizeEl.value = sizes[0] || "";
+    }
+  }
+}
+
+function fillSelect(select, values) {
   select.innerHTML = "";
   values.forEach((value) => {
     const option = document.createElement("option");
@@ -124,22 +172,6 @@ function fillSelect(select, values, selected) {
       option.textContent = value.name;
     }
     select.appendChild(option);
-  });
-  if (selected) {
-    select.value = selected;
-  }
-}
-
-function fillDatalist(datalist, values) {
-  datalist.innerHTML = "";
-  values.forEach((value) => {
-    const option = document.createElement("option");
-    if (typeof value === "string") {
-      option.value = value;
-    } else {
-      option.value = value.id;
-    }
-    datalist.appendChild(option);
   });
 }
 
@@ -428,8 +460,8 @@ function closeSettings() {
 async function loadOptions() {
   try {
     const res = await api("/api/options");
-    if (res.data) {
-      state.options = res.data;
+    if (res.data && res.data.models) {
+      state.options.models = res.data.models;
     }
   } catch (_) {
     // keep defaults
@@ -437,10 +469,16 @@ async function loadOptions() {
 
   fillSelect(el.model, state.options.models);
   fillSelect(el.settingsModel, state.options.models);
-  fillSelect(el.aspectRatio, state.options.aspect_ratios);
   fillSelect(el.quality, state.options.qualities);
-  fillSelect(el.settingsAspectRatio, state.options.aspect_ratios);
   fillSelect(el.settingsQuality, state.options.qualities);
+
+  // Trigger model-dependent dropdown population
+  if (el.model && el.aspectRatio) {
+    updateModelDependentOptions(el.model, el.aspectRatio, el.imageSize, null, null, el.quality);
+  }
+  if (el.settingsModel && el.settingsAspectRatio) {
+    updateModelDependentOptions(el.settingsModel, el.settingsAspectRatio, el.settingsImageSize, null, null, el.settingsQuality);
+  }
 }
 
 function selectedModel() {
@@ -458,20 +496,35 @@ function applyModelValue(selectEl, customEl, value) {
   const options = Array.from(selectEl.options).map((opt) => opt.value);
   if (options.includes(model)) {
     selectEl.value = model;
-    customEl.value = "";
+    if (customEl) customEl.value = "";
   } else if (model) {
     if (options.length) selectEl.value = options[0];
-    customEl.value = model;
+    if (customEl) customEl.value = model;
   } else if (options.length) {
     selectEl.value = options[0];
-    customEl.value = "";
+    if (customEl) customEl.value = "";
   }
 }
 
 function bindModelSelectors() {
+  if (el.model) {
+    el.model.addEventListener("change", () => {
+      const ratio = el.aspectRatio.value;
+      const size = el.imageSize ? el.imageSize.value : "";
+      updateModelDependentOptions(el.model, el.aspectRatio, el.imageSize, ratio, size, el.quality);
+    });
+  }
   if (el.settingsModel) {
     el.settingsModel.addEventListener("change", () => {
       if (el.settingsModelCustom) el.settingsModelCustom.value = "";
+      const ratio = el.settingsAspectRatio.value;
+      const size = el.settingsImageSize ? el.settingsImageSize.value : "";
+      updateModelDependentOptions(el.settingsModel, el.settingsAspectRatio, el.settingsImageSize, ratio, size, el.settingsQuality);
+    });
+  }
+  if (el.settingsModelCustom) {
+    el.settingsModelCustom.addEventListener("input", () => {
+      // custom model: keep ratios/sizes as-is or reset to defaults
     });
   }
 }
@@ -489,22 +542,28 @@ async function loadSettings() {
   }
   el.baseUrl.value = s.base_url || "https://noova.cn";
   applyModelValue(el.settingsModel, el.settingsModelCustom, s.model || "gpt-image-2");
-  el.settingsAspectRatio.value = s.aspect_ratio || "1:1";
-  el.settingsQuality.value = s.quality || "auto";
   el.settingsConcurrency.value = s.concurrency || 2;
   el.settingsPollInterval.value = s.poll_interval_sec || 3;
-  el.settingsPollTimeout.value = s.poll_timeout_sec || 600;
+  el.settingsPollTimeout.value = s.poll_timeout_sec || 300;
   el.settingsSourceDir.value = s.source_dir || "";
   el.settingsOutputDir.value = s.output_dir || "";
 
   el.sourceDir.value = s.source_dir || "";
   el.outputDir.value = s.output_dir || "";
+
+  // Set model and trigger dependent option population
+  const savedModel = s.model || "gpt-image-2";
   if (el.model) {
-    const model = s.model || "gpt-image-2";
     const options = Array.from(el.model.options).map((opt) => opt.value);
-    el.model.value = options.includes(model) ? model : (options[0] || "gpt-image-2");
+    el.model.value = options.includes(savedModel) ? savedModel : (options[0] || "gpt-image-2");
   }
-  el.aspectRatio.value = s.aspect_ratio || "1:1";
+  if (el.aspectRatio && el.imageSize) {
+    updateModelDependentOptions(el.model, el.aspectRatio, el.imageSize, s.aspect_ratio || "1:1", s.image_size || "", el.quality);
+  }
+  if (el.settingsModel && el.settingsAspectRatio && el.settingsImageSize) {
+    updateModelDependentOptions(el.settingsModel, el.settingsAspectRatio, el.settingsImageSize, s.aspect_ratio || "1:1", s.image_size || "", el.settingsQuality);
+  }
+  el.settingsQuality.value = s.quality || "auto";
   el.quality.value = s.quality || "auto";
   el.concurrency.value = s.concurrency || 2;
   if (el.pollInterval) el.pollInterval.value = s.poll_interval_sec || 3;
@@ -516,9 +575,10 @@ async function saveSettings() {
     model: selectedSettingsModel(),
     aspect_ratio: el.settingsAspectRatio.value,
     quality: el.settingsQuality.value,
+    image_size: el.settingsImageSize ? el.settingsImageSize.value : "",
     concurrency: Number(el.settingsConcurrency.value || 2),
     poll_interval_sec: Number(el.settingsPollInterval.value || 3),
-    poll_timeout_sec: Number(el.settingsPollTimeout.value || 600),
+    poll_timeout_sec: Number(el.settingsPollTimeout.value || 300),
     source_dir: el.settingsSourceDir.value.trim(),
     output_dir: el.settingsOutputDir.value.trim(),
   };
@@ -540,30 +600,45 @@ async function testConnection() {
   setSettingsMessage(res.message || "连接成功");
 }
 
+
 async function pickFolder(title = "选择文件夹", initial = "") {
-  const res = await api("/api/folder/pick", {
+  const startRes = await api("/api/folder/pick", {
     method: "POST",
     body: JSON.stringify({
       title,
       initial: (initial || "").trim(),
     }),
   });
-  const data = res.data || {};
-  if (data.cancelled || !data.path) return "";
-  return data.path;
+  const sessionId = startRes.data.session_id;
+  for (let i = 0; i < 240; i++) {
+    await new Promise((r) => setTimeout(r, 500));
+    const res = await api(`/api/pick/${sessionId}`);
+    const data = res.data || {};
+    if (!data.done) continue;
+    if (data.cancelled || !data.path) return "";
+    return data.path;
+  }
+  throw new Error("选择文件夹超时");
 }
 
 async function pickFile(title = "选择图片", initial = "") {
-  const res = await api("/api/file/pick", {
+  const startRes = await api("/api/file/pick", {
     method: "POST",
     body: JSON.stringify({
       title,
       initial: (initial || "").trim(),
     }),
   });
-  const data = res.data || {};
-  if (data.cancelled || !data.path) return "";
-  return data.path;
+  const sessionId = startRes.data.session_id;
+  for (let i = 0; i < 240; i++) {
+    await new Promise((r) => setTimeout(r, 500));
+    const res = await api(`/api/pick/${sessionId}`);
+    const data = res.data || {};
+    if (!data.done) continue;
+    if (data.cancelled || !data.path) return "";
+    return data.path;
+  }
+  throw new Error("选择图片超时");
 }
 
 async function scanFolder() {
@@ -614,6 +689,7 @@ async function startJob() {
     model: selectedModel(),
     aspect_ratio: el.aspectRatio.value,
     quality: el.quality.value,
+    image_size: el.imageSize ? el.imageSize.value : "",
     concurrency: Number(el.concurrency.value || 2),
     poll_interval_sec: Number(el.pollInterval?.value || 3),
     prompts,
@@ -647,13 +723,30 @@ async function cancelJob() {
   if (res.data) renderJob(res.data);
 }
 
+async function deleteJob() {
+  if (!state.currentJobId) return;
+  const res = await api(`/api/jobs/${state.currentJobId}`, { method: "DELETE" });
+  setActionMessage(res.message || "任务已删除");
+  state.currentJobId = null;
+  stopPolling();
+  el.jobSummary.textContent = "";
+  el.statTotal.textContent = "0";
+  el.statSuccess.textContent = "0";
+  el.statFailed.textContent = "0";
+  if (el.statCancelled) el.statCancelled.textContent = "0";
+  el.statPending.textContent = "0";
+  el.progressFill.style.width = "0%";
+  el.progressText.textContent = "0%";
+  el.taskTbody.innerHTML = '<tr><td colspan="5" class="empty">创建任务后显示每张图的处理状态</td></tr>';
+}
+
 function startPolling() {
   stopPolling();
   state.pollTimer = setInterval(() => {
     refreshJob().catch((err) => {
       setActionMessage(err.message || String(err), true);
     });
-  }, 2000);
+  }, 1000);
   refreshJob().catch((err) => {
     setActionMessage(err.message || String(err), true);
   });
@@ -684,6 +777,7 @@ async function refreshJob() {
     if (["completed", "failed", "cancelled"].includes(res.data.status)) {
       stopPolling();
       el.btnCancel.disabled = true;
+      if (el.btnDelete) el.btnDelete.disabled = false;
     } else {
       el.btnCancel.disabled = false;
     }
@@ -696,7 +790,13 @@ function renderJob(job) {
   if (!job) return;
   state.currentJobId = job.id;
 
-  el.jobSummary.textContent = `任务 ${job.id} · ${statusLabel(job.status)} · ${job.message || ""}`;
+  const statusBreakdown = [
+    job.success > 0 ? `成功${job.success}` : "",
+    job.pending > 0 ? `等待${job.pending}` : "",
+    job.failed > 0 ? `失败${job.failed}` : "",
+    job.cancelled > 0 ? `取消${job.cancelled}` : "",
+  ].filter(Boolean).join("/");
+  el.jobSummary.textContent = `任务 ${job.id.slice(0, 8)} · ${statusLabel(job.status)}${statusBreakdown ? " [" + statusBreakdown + "]" : ""} · ${job.message || ""}`;
   el.statTotal.textContent = job.total || 0;
   el.statSuccess.textContent = job.success || 0;
   el.statFailed.textContent = job.failed || 0;
@@ -717,21 +817,29 @@ function renderJob(job) {
 
   el.taskTbody.innerHTML = tasks
     .map((task) => {
+      const errMsg = (task.status === "failed" && task.message) ? `<div class="task-error">${escapeHtml(task.message)}</div>` : "";
+      const pathDisplay = task.output_path || task.result_url || "-";
+      const isCompleted = ["success", "failed", "cancelled"].includes(task.status);
+      const isActive = !isCompleted;
       return `
-        <tr>
+        <tr class="${isActive ? "task-active" : ""}">
           <td>${escapeHtml(task.image_name || "")}</td>
-          <td>${escapeHtml(task.prompt_name || "")}</td>
+          <td><span title="${escapeHtml(task.prompt || "")}">${escapeHtml(task.prompt_name || "")}</span></td>
           <td><span class="status ${escapeHtml(task.status)}">${escapeHtml(
             statusLabel(task.status)
           )}</span></td>
-          <td>${escapeHtml(task.message || "")}</td>
-          <td class="path-cell">${escapeHtml(task.output_path || task.result_url || "-")}</td>
+          <td>
+            <span class="task-msg">${escapeHtml(task.message || "")}</span>
+            ${errMsg}
+          </td>
+          <td class="path-cell">${escapeHtml(pathDisplay)}</td>
         </tr>
       `;
     })
     .join("");
 
   el.btnCancel.disabled = !["queued", "running"].includes(job.status);
+  if (el.btnDelete) el.btnDelete.disabled = ["queued", "running"].includes(job.status);
 }
 
 function bindEvents() {
@@ -826,6 +934,13 @@ function bindEvents() {
       setActionMessage(err.message || String(err), true);
     }
   });
+  document.getElementById("btn-delete-job").addEventListener("click", async () => {
+    try {
+      await deleteJob();
+    } catch (err) {
+      setActionMessage(err.message || String(err), true);
+    }
+  });
   document.getElementById("btn-refresh-job").addEventListener("click", async () => {
     try {
       await refreshJob();
@@ -844,6 +959,7 @@ function bindEvents() {
 
 async function init() {
   bindEvents();
+  bindModelSelectors();
   state.prompts = defaultPrompts();
   renderPrompts();
   if (typeof window.refreshIcons === "function") {

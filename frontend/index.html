@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>批量出图</title>
     <link rel="stylesheet" href="/styles.css" />
-    <script src="https://unpkg.com/lucide@0.469.0"></script>
+    <script src="/lucide.min.js"></script>
   </head>
   <body>
     <div class="app-shell">
@@ -87,6 +87,11 @@
             </label>
 
             <label class="field compact narrow">
+              <span>图像尺寸</span>
+              <select id="image-size"></select>
+            </label>
+
+            <label class="field compact narrow">
               <span>并发</span>
               <input id="concurrency" type="number" min="1" max="10" value="2" />
             </label>
@@ -126,6 +131,10 @@
               <button id="btn-cancel" class="btn danger icon-btn" type="button" disabled>
                 <i data-lucide="square"></i>
                 <span>取消任务</span>
+              </button>
+              <button id="btn-delete-job" class="btn ghost icon-btn" type="button" disabled>
+                <i data-lucide="trash-2"></i>
+                <span>删除记录</span>
               </button>
             </div>
             <span id="action-message" class="status-text"></span>
@@ -232,6 +241,11 @@
           <label class="field">
             <span>默认质量</span>
             <select id="settings-quality"></select>
+          </label>
+
+          <label class="field">
+            <span>默认图像尺寸</span>
+            <select id="settings-image-size"></select>
           </label>
 
           <label class="field">

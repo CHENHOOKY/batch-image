@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -8,20 +10,163 @@ from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 
 from .api_client import NoovaApiError, NoovaClient
-from .config import BASE_DIR, ensure_dirs, load_settings, public_settings, save_settings
+from .config import (
+    BASE_DIR,
+    MODELS,
+    ensure_dirs,
+    load_settings,
+    public_settings,
+    save_settings,
+)
 from .job_manager import job_manager
 from .models import ApiResponse, BatchJobCreate, SettingsUpdate
 
 ensure_dirs()
 
-app = FastAPI(title="批量出图", version="1.1.0")
+app = FastAPI(title="批量出图", version="1.4.1")
 frontend_dir = BASE_DIR / "frontend"
-_folder_pick_lock = asyncio.Lock()
+
+# --- Non-blocking folder/file picker sessions ---
+
+_pick_sessions: dict[str, dict[str, Any]] = {}
+_PICK_SESSION_TTL = 300  # 5 minutes
+
+
+def _cleanup_pick_sessions() -> None:
+    """Remove expired or excess pick sessions."""
+    now = time.monotonic()
+    expired = [
+        sid for sid, s in _pick_sessions.items()
+        if s.get("done") and now - s.get("_completed_at", now) > 30
+    ]
+    for sid in expired:
+        _pick_sessions.pop(sid, None)
+    # Also remove very old incomplete sessions (user abandoned)
+    stale = [
+        sid for sid, s in _pick_sessions.items()
+        if not s.get("done") and now - s.get("_created_at", now) > _PICK_SESSION_TTL
+    ]
+    for sid in stale:
+        _pick_sessions.pop(sid, None)
+    # Keep at most 5 sessions
+    if len(_pick_sessions) > 5:
+        done_ids = [sid for sid, s in _pick_sessions.items() if s.get("done")]
+        for old_id in done_ids[:len(_pick_sessions) - 5]:
+            _pick_sessions.pop(old_id, None)
+
+
+async def _run_folder_picker(session_id: str, title: str, initial: str) -> None:
+    """Run tkinter folder dialog in a thread, store result in session."""
+    import os
+
+    def _pick() -> str | None:
+        import tkinter as tk
+        from tkinter import filedialog
+
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            root.attributes("-topmost", True)
+            root.lift()
+            root.focus_force()
+        except Exception:
+            pass
+        root.update()
+        selected = filedialog.askdirectory(
+            title=title,
+            initialdir=initial if initial and os.path.isdir(initial) else None,
+            mustexist=True,
+        )
+        try:
+            root.destroy()
+        except Exception:
+            pass
+        return selected or None
+
+    try:
+        loop = asyncio.get_running_loop()
+        selected = await loop.run_in_executor(None, _pick)
+        if selected:
+            path = Path(selected).expanduser().resolve()
+            _pick_sessions[session_id]["result"] = str(path)
+            _pick_sessions[session_id]["cancelled"] = False
+        else:
+            _pick_sessions[session_id]["result"] = None
+            _pick_sessions[session_id]["cancelled"] = True
+    except Exception as exc:
+        _pick_sessions[session_id]["error"] = str(exc)
+    finally:
+        _pick_sessions[session_id]["done"] = True
+        _pick_sessions[session_id]["_completed_at"] = time.monotonic()
+
+
+async def _run_file_picker(session_id: str, title: str, initial: str) -> None:
+    """Run tkinter file dialog in a thread, store result in session."""
+    import os
+
+    def _pick() -> str | None:
+        import tkinter as tk
+        from tkinter import filedialog
+
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            root.attributes("-topmost", True)
+            root.lift()
+            root.focus_force()
+        except Exception:
+            pass
+        root.update()
+
+        initial_dir = None
+        if initial:
+            p = Path(initial)
+            if p.is_file():
+                initial_dir = str(p.parent)
+            elif p.is_dir():
+                initial_dir = str(p)
+
+        selected = filedialog.askopenfilename(
+            title=title,
+            initialdir=initial_dir if initial_dir and os.path.isdir(initial_dir) else None,
+            filetypes=[
+                ("Image files", "*.jpg;*.jpeg;*.png;*.webp;*.bmp"),
+                ("All files", "*.*"),
+            ],
+        )
+        try:
+            root.destroy()
+        except Exception:
+            pass
+        return selected or None
+
+    try:
+        loop = asyncio.get_running_loop()
+        selected = await loop.run_in_executor(None, _pick)
+        if selected:
+            path = Path(selected).expanduser().resolve()
+            if path.exists() and path.is_file():
+                _pick_sessions[session_id]["result"] = str(path)
+                _pick_sessions[session_id]["cancelled"] = False
+            else:
+                _pick_sessions[session_id]["error"] = f"文件不存在: {path}"
+                _pick_sessions[session_id]["cancelled"] = True
+        else:
+            _pick_sessions[session_id]["result"] = None
+            _pick_sessions[session_id]["cancelled"] = True
+    except Exception as exc:
+        _pick_sessions[session_id]["error"] = str(exc)
+    finally:
+        _pick_sessions[session_id]["done"] = True
+        _pick_sessions[session_id]["_completed_at"] = time.monotonic()
+
+
+# --- Routes ---
 
 
 @app.get("/api/health")
 async def health() -> dict[str, Any]:
-    return {"ok": True, "service": "batch-image", "version": "1.1.0"}
+    return {"ok": True, "service": "batch-image", "version": "1.4.1"}
 
 
 @app.get("/api/settings")
@@ -45,43 +190,12 @@ async def update_settings(body: SettingsUpdate) -> ApiResponse:
 
 @app.get("/api/models")
 async def list_models() -> ApiResponse:
-    return ApiResponse(
-        data=[
-            {"id": "gpt-image-2", "name": "gpt-image-2"},
-            {"id": "gpt-image-2-vip", "name": "gpt-image-2-vip"},
-        ]
-    )
+    return ApiResponse(data=MODELS)
 
 
 @app.get("/api/options")
 async def list_options() -> ApiResponse:
-    return ApiResponse(
-        data={
-            "aspect_ratios": [
-                "auto",
-                "1:1",
-                "3:2",
-                "2:3",
-                "16:9",
-                "9:16",
-                "5:4",
-                "4:5",
-                "4:3",
-                "3:4",
-                "21:9",
-                "9:21",
-                "1:3",
-                "3:1",
-                "2:1",
-                "1:2",
-            ],
-            "qualities": ["auto", "low", "medium", "high"],
-            "models": [
-                {"id": "gpt-image-2", "name": "gpt-image-2"},
-                {"id": "gpt-image-2-vip", "name": "gpt-image-2-vip"},
-            ],
-        }
-    )
+    return ApiResponse(data={"models": MODELS})
 
 
 @app.post("/api/folder/scan")
@@ -109,105 +223,82 @@ async def scan_folder(body: dict[str, Any]) -> ApiResponse:
 
 
 @app.post("/api/folder/pick")
-async def pick_folder(body: dict[str, Any] | None = None) -> ApiResponse:
-    """Open a native Windows folder dialog and return the selected path."""
-    import os
+async def start_pick_folder(body: dict[str, Any] | None = None) -> ApiResponse:
+    """Start a non-blocking folder picker dialog. Returns session_id for polling."""
+    _cleanup_pick_sessions()
 
     payload = body or {}
     title = str(payload.get("title") or "选择文件夹")
     initial = str(payload.get("initial") or "").strip()
 
-    if _folder_pick_lock.locked():
-        raise HTTPException(status_code=409, detail="已有文件夹选择窗口打开，请先完成当前选择")
+    # Check if a picker is already running
+    for sess in _pick_sessions.values():
+        if not sess.get("done"):
+            raise HTTPException(status_code=409, detail="已有选择窗口打开，请先完成当前选择")
 
-    def _pick() -> str | None:
-        import tkinter as tk
-        from tkinter import filedialog
+    session_id = uuid.uuid4().hex[:12]
+    _pick_sessions[session_id] = {
+        "done": False,
+        "result": None,
+        "cancelled": False,
+        "error": None,
+        "type": "folder",
+        "_created_at": time.monotonic(),
+    }
 
-        root = tk.Tk()
-        root.withdraw()
-        try:
-            root.attributes("-topmost", True)
-        except Exception:
-            pass
-        root.update()
-        selected = filedialog.askdirectory(
-            title=title,
-            initialdir=initial if initial and os.path.isdir(initial) else None,
-            mustexist=True,
-        )
-        try:
-            root.destroy()
-        except Exception:
-            pass
-        return selected or None
-
-    async with _folder_pick_lock:
-        loop = asyncio.get_running_loop()
-        selected = await loop.run_in_executor(None, _pick)
-
-    if not selected:
-        return ApiResponse(ok=True, message="已取消", data={"path": None, "cancelled": True})
-    path = Path(selected).expanduser().resolve()
-    return ApiResponse(data={"path": str(path), "cancelled": False})
+    asyncio.create_task(_run_folder_picker(session_id, title, initial))
+    return ApiResponse(data={"session_id": session_id, "done": False})
 
 
 @app.post("/api/file/pick")
-async def pick_file(body: dict[str, Any] | None = None) -> ApiResponse:
-    """Open a native Windows file dialog and return the selected image path."""
-    import os
+async def start_pick_file(body: dict[str, Any] | None = None) -> ApiResponse:
+    """Start a non-blocking file picker dialog. Returns session_id for polling."""
+    _cleanup_pick_sessions()
 
     payload = body or {}
     title = str(payload.get("title") or "选择图片")
     initial = str(payload.get("initial") or "").strip()
 
-    if _folder_pick_lock.locked():
-        raise HTTPException(status_code=409, detail="已有选择窗口打开，请先完成当前选择")
+    # Check if a picker is already running
+    for sess in _pick_sessions.values():
+        if not sess.get("done"):
+            raise HTTPException(status_code=409, detail="已有选择窗口打开，请先完成当前选择")
 
-    def _pick() -> str | None:
-        import tkinter as tk
-        from tkinter import filedialog
+    session_id = uuid.uuid4().hex[:12]
+    _pick_sessions[session_id] = {
+        "done": False,
+        "result": None,
+        "cancelled": False,
+        "error": None,
+        "type": "file",
+        "_created_at": time.monotonic(),
+    }
 
-        root = tk.Tk()
-        root.withdraw()
-        try:
-            root.attributes("-topmost", True)
-        except Exception:
-            pass
-        root.update()
+    asyncio.create_task(_run_file_picker(session_id, title, initial))
+    return ApiResponse(data={"session_id": session_id, "done": False})
 
-        initial_dir = None
-        if initial:
-            p = Path(initial)
-            if p.is_file():
-                initial_dir = str(p.parent)
-            elif p.is_dir():
-                initial_dir = str(p)
 
-        selected = filedialog.askopenfilename(
-            title=title,
-            initialdir=initial_dir if initial_dir and os.path.isdir(initial_dir) else None,
-            filetypes=[
-                ("Image files", "*.jpg;*.jpeg;*.png;*.webp;*.bmp"),
-                ("All files", "*.*"),
-            ],
-        )
-        try:
-            root.destroy()
-        except Exception:
-            pass
-        return selected or None
+@app.get("/api/pick/{session_id}")
+async def poll_pick(session_id: str) -> ApiResponse:
+    """Poll for the result of a folder/file picker session."""
+    _cleanup_pick_sessions()
 
-    async with _folder_pick_lock:
-        loop = asyncio.get_running_loop()
-        selected = await loop.run_in_executor(None, _pick)
+    session = _pick_sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="选择会话不存在")
 
-    if not selected:
-        return ApiResponse(ok=True, message="已取消", data={"path": None, "cancelled": True})
-    path = Path(selected).expanduser().resolve()
-    if not path.exists() or not path.is_file():
-        raise HTTPException(status_code=400, detail=f"文件不存在: {path}")
-    return ApiResponse(data={"path": str(path), "cancelled": False})
+    if not session.get("done"):
+        return ApiResponse(data={"session_id": session_id, "done": False})
+
+    result: dict[str, Any] = {
+        "session_id": session_id,
+        "done": True,
+        "cancelled": session.get("cancelled", False),
+        "path": session.get("result"),
+    }
+    if session.get("error"):
+        result["error"] = session["error"]
+    return ApiResponse(data=result)
 
 
 @app.post("/api/test-connection")
@@ -218,11 +309,7 @@ async def test_connection() -> ApiResponse:
             api_key=str(settings.get("api_key") or ""),
             base_url=str(settings.get("base_url") or "https://noova.cn"),
         ) as client:
-            await client.get_upload_credential(
-                filename="connection-test.png",
-                content_type="image/png",
-                size=128,
-            )
+            await client.verify_connection()
         return ApiResponse(message="连接成功，API Key 可用")
     except NoovaApiError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -262,6 +349,115 @@ async def cancel_job(job_id: str) -> ApiResponse:
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
+
+@app.delete("/api/jobs/{job_id}")
+async def delete_job(job_id: str) -> ApiResponse:
+    try:
+        job = await job_manager.delete_job(job_id)
+        return ApiResponse(message="任务已删除", data=job.to_dict())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+
+
+# ---- Browser-native folder / file path resolution ----
+# When the user picks a folder via <input webkitdirectory>, the browser
+# only gives us a relative path.  We resolve it by asking the OS to locate
+# the file we just saw, then strip the file name to get the folder.
+
+import subprocess as _subprocess
+import platform as _platform
+
+@app.post("/api/folder/resolve-prefix")
+async def resolve_folder_prefix(body: dict[str, Any]) -> ApiResponse:
+    """Given a filename and its relative_path from webkitdirectory,
+    find the absolute folder on disk by scanning the file system
+    inside likely roots (exe dir, desktop, home)."""
+    fname = str(body.get("filename") or "").strip()
+    rel = str(body.get("relative_path") or "").strip()
+    if not fname or not rel:
+        raise HTTPException(status_code=400, detail="filename / relative_path required")
+
+    dir_prefix = rel[: -len(fname)].rstrip("/").rstrip("\\")
+    import os as _os
+    _matched = None
+
+    # Walk from the exe directory and its parents (up to 3 levels up),
+    # then desktop, then home.  Stop as soon as we find the file.
+    roots = []
+    try:
+        cur = str(BASE_DIR)
+        for _ in range(5):
+            roots.append(cur)
+            parent = _os.path.dirname(cur)
+            if parent == cur:
+                break
+            cur = parent
+        roots.append(_os.path.join(_os.path.expanduser("~"), "Desktop"))
+        roots.append(_os.path.expanduser("~"))
+    except Exception:
+        roots = [str(BASE_DIR)]
+
+    for sysroot in roots:
+        try:
+            for dirpath, _dirnames, filenames in _os.walk(sysroot):
+                if fname in filenames:
+                    # If the relative prefix matches, prefer that
+                    norm = dirpath.replace("\\", "/")
+                    if dir_prefix and norm.endswith("/" + dir_prefix):
+                        _matched = norm[: -len(dir_prefix)].rstrip("/")
+                        break
+                    # Otherwise take any match
+                    if _matched is None:
+                        _matched = norm
+            if _matched:
+                break
+        except (PermissionError, OSError):
+            continue
+
+    if _matched:
+        return ApiResponse(data={"path": _matched, "root": sysroot})
+    # Fallback: just return the relative parent as a best-guess path
+    fallback = str(Path(BASE_DIR) / dir_prefix) if dir_prefix else str(BASE_DIR)
+    return ApiResponse(data={"path": fallback, "root": str(BASE_DIR)})
+
+
+@app.post("/api/file/resolve-abs")
+async def resolve_file_abs(body: dict[str, Any]) -> ApiResponse:
+    """Given a file picked via <input type=file>, find its absolute path
+    in the workspace.  The browser only sends filename/size/type/lastModified,
+    so we best-effort locate the file."""
+    fname = str(body.get("filename") or "").strip()
+    if not fname:
+        raise HTTPException(status_code=400, detail="filename required")
+    import os as _os
+    roots = {str(BASE_DIR)}
+    try:
+        _p = next(iter(roots))
+        roots.add(_os.path.expanduser("~"))
+        if _platform.system() == "Windows":
+            roots.add("C:\\")
+    except Exception:
+        pass
+    for sysroot in roots:
+        try:
+            if _platform.system() == "Windows":
+                result = _subprocess.run(
+                    ["cmd", "/c", "where", "/r", f"{sysroot}", fname],
+                    capture_output=True, encoding="gbk", errors="replace", timeout=20,
+                )
+            else:
+                result = _subprocess.run(
+                    ["find", sysroot, "-name", fname, "-maxdepth", 15],
+                    capture_output=True, encoding="gbk", errors="replace", timeout=20,
+                )
+            lines = [l.strip() for l in result.stdout.splitlines() if l.strip()]
+            if lines:
+                return ApiResponse(data={"path": lines[0]})
+        except Exception:
+            continue
+    return ApiResponse(data={"path": ""})
 
 if frontend_dir.exists():
     app.mount("/", StaticFiles(directory=str(frontend_dir), html=True), name="frontend")

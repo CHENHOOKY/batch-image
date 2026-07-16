@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -41,7 +42,7 @@ def folder_name_from_prompt(prompt: str, max_len: int = 40) -> str:
     return f"{text}_{digest}"
 
 
-def now_iso() -> str:
+def now_str() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
@@ -49,12 +50,11 @@ def unique_output_path(directory: Path, stem: str, suffix: str) -> Path:
     candidate = directory / f"{stem}{suffix}"
     if not candidate.exists():
         return candidate
-    index = 2
-    while True:
+    for index in range(2, 10000):
         candidate = directory / f"{stem}_{index}{suffix}"
         if not candidate.exists():
             return candidate
-        index += 1
+    raise RuntimeError(f"输出文件名冲突过多: {stem}{suffix}")
 
 
 @dataclass
@@ -121,11 +121,12 @@ class BatchJob:
     aspect_ratio: str
     quality: str
     concurrency: int
+    image_size: str = ""
     poll_interval_sec: float = 3.0
     tasks: list[JobTask] = field(default_factory=list)
     status: JobStatus = "queued"
     message: str = ""
-    created_at: str = field(default_factory=now_iso)
+    created_at: str = field(default_factory=now_str)
     started_at: str | None = None
     finished_at: str | None = None
     cancel_flag: bool = False
@@ -157,8 +158,8 @@ class BatchJob:
             "model": self.model,
             "aspect_ratio": self.aspect_ratio,
             "quality": self.quality,
+            "image_size": self.image_size,
             "concurrency": self.concurrency,
-            "poll_interval_sec": self.poll_interval_sec,
             "total": c["total"],
             "success": c["success"],
             "failed": c["failed"],
@@ -170,7 +171,8 @@ class BatchJob:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "BatchJob":
-        tasks = [JobTask.from_dict(t) for t in (data.get("tasks") or [])]
+        tasks_data = data.get("tasks") or []
+        tasks = [JobTask.from_dict(t) for t in tasks_data if isinstance(t, dict)]
         return cls(
             id=str(data.get("id") or uuid.uuid4().hex[:12]),
             source_dir=str(data.get("source_dir") or ""),
@@ -178,12 +180,13 @@ class BatchJob:
             model=str(data.get("model") or "gpt-image-2"),
             aspect_ratio=str(data.get("aspect_ratio") or "1:1"),
             quality=str(data.get("quality") or "auto"),
+            image_size=str(data.get("image_size") or ""),
             concurrency=int(data.get("concurrency") or 2),
             poll_interval_sec=float(data.get("poll_interval_sec") or 3),
             tasks=tasks,
             status=data.get("status") or "queued",
             message=str(data.get("message") or ""),
-            created_at=str(data.get("created_at") or now_iso()),
+            created_at=str(data.get("created_at") or now_str()),
             started_at=data.get("started_at"),
             finished_at=data.get("finished_at"),
             cancel_flag=bool(data.get("cancel_flag") or False),
@@ -191,11 +194,14 @@ class BatchJob:
 
 
 class JobManager:
+    _SAVE_INTERVAL = 2.0
+
     def __init__(self) -> None:
         self._jobs: dict[str, BatchJob] = {}
         self._lock = asyncio.Lock()
         self._persist_lock = asyncio.Lock()
         self._active_job_id: str | None = None
+        self._last_save_time: float = 0.0
         self._load_jobs()
 
     def _load_jobs(self) -> None:
@@ -219,7 +225,7 @@ class JobManager:
             if job.status in {"queued", "running"}:
                 job.status = "failed"
                 job.message = "服务重启，任务中断"
-                job.finished_at = job.finished_at or now_iso()
+                job.finished_at = job.finished_at or now_str()
                 for task in job.tasks:
                     if task.status in {
                         "pending",
@@ -232,10 +238,14 @@ class JobManager:
                         task.message = "服务重启，任务中断"
             self._jobs[job.id] = job
 
-    async def _save_jobs(self) -> None:
+    async def _save_jobs(self, force: bool = False) -> None:
+        now = time.monotonic()
+        if not force and now - self._last_save_time < self._SAVE_INTERVAL:
+            return
+        self._last_save_time = now
         ensure_dirs()
         payload = {
-            "updated_at": now_iso(),
+            "updated_at": now_str(),
             "jobs": [job.to_dict() | {"cancel_flag": job.cancel_flag} for job in self._jobs.values()],
         }
         async with self._persist_lock:
@@ -271,6 +281,7 @@ class JobManager:
         model = payload.get("model") or settings.get("model") or "gpt-image-2"
         aspect_ratio = payload.get("aspect_ratio") or settings.get("aspect_ratio") or "1:1"
         quality = payload.get("quality") or settings.get("quality") or "auto"
+        image_size = payload.get("image_size") or settings.get("image_size") or ""
         concurrency = int(payload.get("concurrency") or settings.get("concurrency") or 2)
         concurrency = max(1, min(concurrency, 10))
         poll_interval_sec = float(
@@ -377,6 +388,7 @@ class JobManager:
             model=str(model),
             aspect_ratio=str(aspect_ratio),
             quality=str(quality),
+            image_size=str(image_size),
             concurrency=concurrency,
             poll_interval_sec=poll_interval_sec,
             tasks=job_tasks,
@@ -386,7 +398,7 @@ class JobManager:
             self._jobs[job.id] = job
             self._active_job_id = job.id
 
-        await self._save_jobs()
+        await self._save_jobs(force=True)
         asyncio.create_task(self._run_job(job.id))
         return job
 
@@ -397,7 +409,19 @@ class JobManager:
         job.cancel_flag = True
         if job.status in {"queued", "running"}:
             job.message = "正在取消..."
-        await self._save_jobs()
+        await self._save_jobs(force=True)
+        return job
+
+    async def delete_job(self, job_id: str) -> BatchJob:
+        job = self._jobs.get(job_id)
+        if not job:
+            raise ValueError("任务不存在")
+        if job.status in {"queued", "running"}:
+            raise ValueError("任务正在运行，请先取消再删除")
+        del self._jobs[job_id]
+        if self._active_job_id == job_id:
+            self._active_job_id = None
+        await self._save_jobs(force=True)
         return job
 
     async def _run_job(self, job_id: str) -> None:
@@ -407,9 +431,9 @@ class JobManager:
 
         settings = load_settings()
         job.status = "running"
-        job.started_at = now_iso()
+        job.started_at = now_str()
         job.message = "任务执行中"
-        await self._save_jobs()
+        await self._save_jobs(force=True)
 
         try:
             client = NoovaClient(
@@ -419,30 +443,40 @@ class JobManager:
         except NoovaApiError as exc:
             job.status = "failed"
             job.message = str(exc)
-            job.finished_at = now_iso()
+            job.finished_at = now_str()
             for task in job.tasks:
                 if task.status == "pending":
                     task.status = "failed"
                     task.message = str(exc)
             if self._active_job_id == job.id:
                 self._active_job_id = None
-            await self._save_jobs()
+            await self._save_jobs(force=True)
             return
 
         poll_interval = float(job.poll_interval_sec or settings.get("poll_interval_sec") or 3)
-        poll_timeout = float(settings.get("poll_timeout_sec") or 600)
+        poll_timeout = float(settings.get("poll_timeout_sec") or 300)
         semaphore = asyncio.Semaphore(job.concurrency)
-        upload_cache: dict[str, str] = {}
-        upload_locks: dict[str, asyncio.Lock] = {}
-        upload_locks_guard = asyncio.Lock()
+        image_cache: dict[str, str] = {}
 
-        async def get_upload_lock(path_key: str) -> asyncio.Lock:
-            async with upload_locks_guard:
-                lock = upload_locks.get(path_key)
-                if lock is None:
-                    lock = asyncio.Lock()
-                    upload_locks[path_key] = lock
-                return lock
+        # Pre-upload fixed reference images via STS direct upload (once per unique image)
+        fixed_url_lookup: dict[str, str] = {}
+        for task in job.tasks:
+            for raw_path in (task.extra_image_1, task.extra_image_2):
+                if raw_path and raw_path not in fixed_url_lookup:
+                    try:
+                        task.status = "uploading"
+                        task.message = "upload fixed: " + Path(raw_path).name
+                        url = await client.upload_image_direct(Path(raw_path))
+                        fixed_url_lookup[raw_path] = url
+                    except Exception as exc:
+                        # Mark all tasks that use this fixed image as failed
+                        for t in job.tasks:
+                            if t.extra_image_1 == raw_path or t.extra_image_2 == raw_path:
+                                t.status = "failed"
+                                t.message = "failed to upload fixed image: " + str(exc)
+                        await self._save_jobs()
+                        # Continue without this fixed image
+        await self._save_jobs()
 
         async def worker(task: JobTask) -> None:
             async with semaphore:
@@ -457,8 +491,8 @@ class JobManager:
                     task=task,
                     poll_interval=poll_interval,
                     poll_timeout=poll_timeout,
-                    upload_cache=upload_cache,
-                    get_upload_lock=get_upload_lock,
+                    image_cache=image_cache,
+                    fixed_url_lookup=fixed_url_lookup,
                 )
                 await self._save_jobs()
 
@@ -486,10 +520,11 @@ class JobManager:
                         f"部分完成：成功 {counts['success']}，"
                         f"失败 {counts['failed']}，取消 {counts['cancelled']}"
                     )
-            job.finished_at = now_iso()
+            job.finished_at = now_str()
             if self._active_job_id == job.id:
                 self._active_job_id = None
-            await self._save_jobs()
+            image_cache.clear()
+            await self._save_jobs(force=True)
 
     async def _run_task(
         self,
@@ -499,153 +534,107 @@ class JobManager:
         task: JobTask,
         poll_interval: float,
         poll_timeout: float,
-        upload_cache: dict[str, str],
-        get_upload_lock,
+        image_cache: dict[str, str],
+        fixed_url_lookup: dict[str, str],
     ) -> None:
+        # Same logic as folder_batch_draw.py _process_image()
         try:
             if job.cancel_flag:
                 task.status = "cancelled"
-                task.message = "已取消"
+                task.message = "canceled"
                 return
 
             image_path = Path(task.image_path)
             prompt_dir = Path(task.output_dir)
             prompt_dir.mkdir(parents=True, exist_ok=True)
+            fname = task.image_name
 
+            # Build fixed_url_list from pre-uploaded lookup
+            fixed_url_list: list[str] = []
+            for raw_path in (task.extra_image_1, task.extra_image_2):
+                if raw_path and raw_path in fixed_url_lookup:
+                    fixed_url_list.append(fixed_url_lookup[raw_path])
+
+            # Upload source image via STS direct upload (cached per unique image path)
             task.status = "uploading"
-            task.message = "上传参考图中"
-
-            async def ensure_uploaded(local_path: Path, cache_key: str, label: str) -> str:
-                if cache_key in upload_cache:
-                    task.message = f"复用已上传{label}"
-                    return upload_cache[cache_key]
-                lock = await get_upload_lock(cache_key)
-                async with lock:
-                    cached = upload_cache.get(cache_key)
-                    if cached:
-                        task.message = f"复用已上传{label}"
-                        return cached
-                    task.message = f"上传{label}"
-                    uploaded = await client.upload_local_file(local_path)
-                    upload_cache[cache_key] = uploaded
-                    return uploaded
-
-            # 固定图优先：图一、图二，再是文件夹当前图
-            ordered_urls: list[str] = []
-            if task.extra_image_1:
-                ordered_urls.append(
-                    await ensure_uploaded(Path(task.extra_image_1), task.extra_image_1, "图一")
-                )
-            if job.cancel_flag:
-                task.status = "cancelled"
-                task.message = "已取消"
-                return
-
-            if task.extra_image_2:
-                ordered_urls.append(
-                    await ensure_uploaded(Path(task.extra_image_2), task.extra_image_2, "图二")
-                )
-            if job.cancel_flag:
-                task.status = "cancelled"
-                task.message = "已取消"
-                return
-
-            main_url = await ensure_uploaded(image_path, task.image_path, "源图")
-            ordered_urls.append(main_url)
+            task.message = "upload: " + fname
+            cache_key = str(image_path)
+            source_url = image_cache.get(cache_key)
+            if source_url is None:
+                source_url = await client.upload_image_direct(image_path)
+                image_cache[cache_key] = source_url
 
             if job.cancel_flag:
                 task.status = "cancelled"
-                task.message = "已取消"
+                task.message = "canceled"
                 return
 
+            # Submit: fixed refs first, then source
             task.status = "submitting"
-            task.message = "提交生成任务"
+            task.message = "submit: " + fname
+            all_urls = fixed_url_list + [source_url]
             remote_id = await client.create_draw_task(
                 model=job.model,
                 prompt=task.prompt,
                 aspect_ratio=job.aspect_ratio,
                 quality=job.quality,
-                urls=ordered_urls,
+                image_size=job.image_size or "1K",
+                urls=all_urls,
             )
             task.remote_task_id = remote_id
 
+            # Poll for result
             task.status = "processing"
-            task.message = "等待出图结果"
-            result_url = await self._poll_result(
-                client=client,
-                task=task,
-                job=job,
-                poll_interval=poll_interval,
-                poll_timeout=poll_timeout,
+            task.message = "polling (0%)"
+
+            async def cancel_check():
+                return job.cancel_flag
+
+            result_data = await client.poll_task_result(
+                task_id=remote_id,
+                poll_interval=int(poll_interval),
+                cancel_check=cancel_check,
             )
-            if task.status == "cancelled":
+
+            if job.cancel_flag:
+                task.status = "cancelled"
+                task.message = "canceled"
                 return
 
-            task.status = "downloading"
-            task.message = "下载生成图"
-            suffix = self._guess_suffix(result_url, image_path.suffix or ".png")
-            output_path = unique_output_path(prompt_dir, image_path.stem, suffix)
-            await client.download_file(result_url, output_path)
+            status = client.get_status(result_data)
+            progress = client.get_progress(result_data)
+            task.message = "status: " + status + " (" + str(progress) + "%)"
 
-            task.output_path = str(output_path.resolve())
-            task.result_url = result_url
-            task.status = "success"
-            task.message = "完成"
-        except Exception as exc:  # noqa: BLE001
+            if status == "succeeded":
+                final_url = client.get_succeeded_url(result_data)
+                if final_url:
+                    task.status = "downloading"
+                    task.message = "downloading"
+                    suffix = self._guess_suffix(final_url, image_path.suffix or ".png")
+                    output_path = unique_output_path(prompt_dir, image_path.stem, suffix)
+                    await client.download_file(final_url, output_path)
+                    task.output_path = str(output_path.resolve())
+                    task.result_url = final_url
+                    task.status = "success"
+                    task.message = "done"
+                else:
+                    task.status = "failed"
+                    task.message = "API succeeded but no image URL"
+            else:
+                err = (
+                    result_data.get("error")
+                    or result_data.get("failure_reason")
+                    or status
+                )
+                task.status = "failed"
+                task.message = str(err)
+        except Exception as exc:
             if job.cancel_flag and task.status != "success":
                 task.status = "cancelled"
-                task.message = "已取消"
+                task.message = "canceled"
             else:
                 task.status = "failed"
                 task.message = str(exc)
-
-    async def _poll_result(
-        self,
-        *,
-        client: NoovaClient,
-        task: JobTask,
-        job: BatchJob,
-        poll_interval: float,
-        poll_timeout: float,
-    ) -> str:
-        if not task.remote_task_id:
-            raise NoovaApiError("缺少远程任务 ID")
-
-        elapsed = 0.0
-        while elapsed <= poll_timeout:
-            if job.cancel_flag:
-                task.status = "cancelled"
-                task.message = "已取消"
-                return ""
-
-            result = await client.query_draw_result(task.remote_task_id)
-            status = client.extract_status(result)
-            urls = client.extract_result_urls(result)
-
-            if client.is_failed_status(status):
-                message = (
-                    result.get("message")
-                    or result.get("error")
-                    or result.get("msg")
-                    or f"远程任务失败: {status}"
-                )
-                raise NoovaApiError(str(message), payload=result)
-
-            # only download on explicit success status + url
-            if urls and client.is_success_status(status):
-                return urls[0]
-
-            # some APIs omit status but return final payload fields
-            if urls and status in {"", "unknown"} and (
-                result.get("completed") is True or result.get("done") is True
-            ):
-                return urls[0]
-
-            task.message = f"处理中 ({status or 'processing'})"
-            await asyncio.sleep(poll_interval)
-            elapsed += poll_interval
-
-        raise NoovaApiError(f"等待结果超时（{int(poll_timeout)} 秒）")
 
     @staticmethod
     def _guess_suffix(url: str, fallback: str) -> str:
