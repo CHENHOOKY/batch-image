@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>批量出图</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="https://unpkg.com/lucide@0.469.0"></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">
+            <i data-lucide="images"></i>
+          </div>
+          <div>
+            <h1>批量出图</h1>
+            <p class="subtitle">本地批量 · 多提示词 · 自动归档</p>
+          </div>
+        </div>
+        <div class="top-actions">
+          <button id="btn-refresh-job" class="btn ghost icon-btn" type="button" title="刷新进度">
+            <i data-lucide="refresh-cw"></i>
+            <span>刷新</span>
+          </button>
+          <button id="btn-open-settings" class="btn ghost icon-btn" type="button" title="设置">
+            <i data-lucide="settings"></i>
+            <span>设置</span>
+          </button>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <section class="section config-section">
+          <div class="section-head">
+            <div>
+              <h2>任务配置</h2>
+              <p id="scan-summary" class="section-note">尚未扫描源文件夹</p>
+            </div>
+          </div>
+
+          <div class="config-grid">
+            <label class="field path-field path-source">
+              <span>源图片文件夹</span>
+              <div class="control-row">
+                <input id="source-dir" type="text" placeholder="选择源图目录" />
+                <button id="btn-pick-source" class="btn secondary icon-only" type="button" title="选择文件夹">
+                  <i data-lucide="folder-open"></i>
+                </button>
+                <button id="btn-scan" class="btn secondary icon-btn" type="button" title="扫描图片">
+                  <i data-lucide="search"></i>
+                  <span>扫描</span>
+                </button>
+              </div>
+            </label>
+
+            <label class="field path-field path-output">
+              <span>输出文件夹</span>
+              <div class="control-row">
+                <input id="output-dir" type="text" placeholder="选择输出目录" />
+                <button id="btn-pick-output" class="btn secondary icon-only" type="button" title="选择文件夹">
+                  <i data-lucide="folder-open"></i>
+                </button>
+              </div>
+            </label>
+
+            <div class="options-row">
+            <label class="field compact">
+              <span>模型</span>
+              <select id="model"></select>
+            </label>
+
+            <label class="field compact narrow">
+              <span>轮询时间(秒)</span>
+              <input id="poll-interval" type="number" min="1" max="60" value="3" />
+            </label>
+
+            <label class="field compact">
+              <span>比例</span>
+              <select id="aspect-ratio"></select>
+            </label>
+
+            <label class="field compact">
+              <span>质量</span>
+              <select id="quality"></select>
+            </label>
+
+            <label class="field compact narrow">
+              <span>并发</span>
+              <input id="concurrency" type="number" min="1" max="10" value="2" />
+            </label>
+            </div>
+          </div>
+
+          <div class="prompts-block">
+            <div class="section-head prompts-head">
+              <div>
+                <h2>提示词</h2>
+                <p class="section-note">最多 10 个 · 点击卡片展开编辑</p>
+              </div>
+              <div class="prompt-toolbar">
+                <button id="btn-expand-prompts" class="btn ghost icon-btn" type="button" title="全部展开">
+                  <i data-lucide="chevrons-down-up"></i>
+                  <span>展开</span>
+                </button>
+                <button id="btn-collapse-prompts" class="btn ghost icon-btn" type="button" title="全部收起">
+                  <i data-lucide="chevrons-up-down"></i>
+                  <span>收起</span>
+                </button>
+                <button id="btn-add-prompt" class="btn secondary icon-btn" type="button" title="添加提示词">
+                  <i data-lucide="plus"></i>
+                  <span>添加</span>
+                </button>
+              </div>
+            </div>
+            <div id="prompt-list" class="prompt-list"></div>
+          </div>
+
+          <div class="action-bar">
+            <div class="action-buttons">
+              <button id="btn-start" class="btn primary icon-btn" type="button">
+                <i data-lucide="play"></i>
+                <span>开始批量出图</span>
+              </button>
+              <button id="btn-cancel" class="btn danger icon-btn" type="button" disabled>
+                <i data-lucide="square"></i>
+                <span>取消任务</span>
+              </button>
+            </div>
+            <span id="action-message" class="status-text"></span>
+          </div>
+        </section>
+
+        <section class="section progress-section">
+          <div class="section-head">
+            <div>
+              <h2>运行进度</h2>
+              <p id="job-summary" class="section-note">暂无任务</p>
+            </div>
+          </div>
+
+          <div class="stats" id="job-stats">
+            <div class="stat">
+              <span>总数</span>
+              <strong id="stat-total">0</strong>
+            </div>
+            <div class="stat ok">
+              <span>成功</span>
+              <strong id="stat-success">0</strong>
+            </div>
+            <div class="stat bad">
+              <span>失败</span>
+              <strong id="stat-failed">0</strong>
+            </div>
+            <div class="stat mute">
+              <span>取消</span>
+              <strong id="stat-cancelled">0</strong>
+            </div>
+            <div class="stat warn">
+              <span>进行中</span>
+              <strong id="stat-pending">0</strong>
+            </div>
+          </div>
+
+          <div class="progress-wrap">
+            <div class="progress-bar"><div id="progress-fill" class="progress-fill"></div></div>
+            <div id="progress-text" class="progress-text">0%</div>
+          </div>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>图片</th>
+                  <th>提示词</th>
+                  <th>状态</th>
+                  <th>说明</th>
+                  <th>输出</th>
+                </tr>
+              </thead>
+              <tbody id="task-tbody">
+                <tr>
+                  <td colspan="5" class="empty">创建任务后显示每张图的处理状态</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div id="settings-modal" class="modal hidden" aria-hidden="true">
+      <div class="modal-card">
+        <div class="section-head">
+          <div>
+            <h2>设置</h2>
+            <p class="section-note">API 与默认参数</p>
+          </div>
+          <button id="btn-close-settings" class="btn ghost icon-only" type="button" title="关闭">
+            <i data-lucide="x"></i>
+          </button>
+        </div>
+
+        <div class="settings-grid">
+          <label class="field field-span-2">
+            <span>API Key</span>
+            <input id="api-key" type="password" placeholder="已保存则留空不修改" autocomplete="off" />
+            <span id="api-key-hint" class="field-hint"></span>
+          </label>
+
+          <label class="field field-span-2">
+            <span>API Base URL</span>
+            <input id="base-url" type="text" placeholder="https://noova.cn" />
+          </label>
+
+          <label class="field">
+            <span>默认模型</span>
+            <select id="settings-model"></select>
+          </label>
+
+          <label class="field">
+            <span>自定义默认模型</span>
+            <input id="settings-model-custom" type="text" placeholder="可选，优先于上方选择" />
+          </label>
+
+          <label class="field">
+            <span>默认比例</span>
+            <select id="settings-aspect-ratio"></select>
+          </label>
+
+          <label class="field">
+            <span>默认质量</span>
+            <select id="settings-quality"></select>
+          </label>
+
+          <label class="field">
+            <span>默认并发</span>
+            <input id="settings-concurrency" type="number" min="1" max="10" />
+          </label>
+
+          <label class="field">
+            <span>轮询间隔（秒）</span>
+            <input id="settings-poll-interval" type="number" min="1" max="60" />
+          </label>
+
+          <label class="field">
+            <span>超时时间（秒）</span>
+            <input id="settings-poll-timeout" type="number" min="30" max="3600" />
+          </label>
+
+          <label class="field field-span-2">
+            <span>默认源文件夹</span>
+            <div class="control-row">
+              <input id="settings-source-dir" type="text" />
+              <button id="btn-pick-settings-source" class="btn secondary icon-only" type="button" title="选择文件夹">
+                <i data-lucide="folder-open"></i>
+              </button>
+            </div>
+          </label>
+
+          <label class="field field-span-2">
+            <span>默认输出文件夹</span>
+            <div class="control-row">
+              <input id="settings-output-dir" type="text" />
+              <button id="btn-pick-settings-output" class="btn secondary icon-only" type="button" title="选择文件夹">
+                <i data-lucide="folder-open"></i>
+              </button>
+            </div>
+          </label>
+        </div>
+
+        <div class="action-bar modal-actions">
+          <div class="action-buttons">
+            <button id="btn-save-settings" class="btn primary icon-btn" type="button">
+              <i data-lucide="save"></i>
+              <span>保存设置</span>
+            </button>
+            <button id="btn-test-connection" class="btn secondary icon-btn" type="button">
+              <i data-lucide="plug-zap"></i>
+              <span>测试连接</span>
+            </button>
+          </div>
+          <span id="settings-message" class="status-text"></span>
+        </div>
+      </div>
+    </div>
+
+    <script src="/app.js"></script>
+    <script>
+      window.refreshIcons = function refreshIcons() {
+        if (window.lucide && typeof window.lucide.createIcons === "function") {
+          window.lucide.createIcons();
+        }
+      };
+      window.refreshIcons();
+    </script>
+  </body>
+</html>
