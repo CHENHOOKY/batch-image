@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 from pathlib import Path
@@ -51,7 +51,7 @@ MODELS: list[dict[str, Any]] = [
         "id": "gpt-image-2",
         "name": "gpt-image-2",
         "endpoint": "/v1/draw/completions",
-        "image_param": "images",
+        "image_param": "urls",
         "aspect_ratios": GPT_IMAGE_RATIOS,
         "image_sizes": [],
         "supports_quality": True,
@@ -115,7 +115,7 @@ def get_model_endpoint(model_id: str) -> str:
 
 
 def get_model_image_param(model_id: str) -> str:
-    """Return the JSON field name for images: 'images' (base64) or 'urls'."""
+    """Return the JSON field name for image references (all current models: 'urls')."""
     return get_model_info(model_id)["image_param"]
 
 
@@ -127,14 +127,15 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "api_key": "",
     "base_url": "https://noova.cn",
     "model": "gpt-image-2",
-    "aspect_ratio": "1:1",
+    "aspect_ratio": "9:16",
     "quality": "auto",
     "image_size": "",
-    "concurrency": 2,
-    "poll_interval_sec": 3,
+    "concurrency": 10,
+    "poll_interval_sec": 20,
     "poll_timeout_sec": 300,
     "source_dir": "",
     "output_dir": str(BASE_DIR / "outputs"),
+    "image_proxy_url": "https://imageproxy.zhongzhuan.chat/api/upload",
 }
 
 

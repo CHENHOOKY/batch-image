@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import hashlib
@@ -439,6 +439,7 @@ class JobManager:
             client = NoovaClient(
                 api_key=str(settings.get("api_key") or ""),
                 base_url=str(settings.get("base_url") or "https://noova.cn"),
+                image_proxy_url=str(settings.get("image_proxy_url") or ""),
             )
         except NoovaApiError as exc:
             job.status = "failed"
@@ -484,6 +485,9 @@ class JobManager:
                     task.status = "cancelled"
                     task.message = "已取消"
                     await self._save_jobs()
+                    return
+                # Skip tasks already marked terminal (e.g. fixed-image upload failed)
+                if task.status in {"failed", "cancelled", "success"}:
                     return
                 await self._run_task(
                     client=client,
@@ -594,6 +598,7 @@ class JobManager:
                 task_id=remote_id,
                 poll_interval=int(poll_interval),
                 cancel_check=cancel_check,
+                poll_timeout=poll_timeout,
             )
 
             if job.cancel_flag:

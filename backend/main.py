@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import time
@@ -308,6 +308,7 @@ async def test_connection() -> ApiResponse:
         async with NoovaClient(
             api_key=str(settings.get("api_key") or ""),
             base_url=str(settings.get("base_url") or "https://noova.cn"),
+            image_proxy_url=str(settings.get("image_proxy_url") or ""),
         ) as client:
             await client.verify_connection()
         return ApiResponse(message="连接成功，API Key 可用")

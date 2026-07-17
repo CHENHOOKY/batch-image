@@ -18,6 +18,7 @@ hidden = [
     "uvicorn.loops.auto", "uvicorn.protocols.http.auto",
     "uvicorn.logging", "uvicorn.lifespan.on",
     "http", "http.server", "http.client",
+    "PIL", "PIL.Image",
 ]
 
 excl = ["unittest", "xml", "xmlrpc",

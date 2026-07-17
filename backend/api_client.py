@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import base64
 import io
@@ -24,12 +24,13 @@ class NoovaApiError(RuntimeError):
 
 
 class NoovaClient:
-    def __init__(self, api_key: str, base_url: str = "https://noova.cn", timeout: float = 900.0):
+    def __init__(self, api_key: str, base_url: str = "https://noova.cn", timeout: float = 900.0, image_proxy_url: str = ""):
         if not api_key or not api_key.strip():
             raise NoovaApiError("\u8bf7\u5148\u5728\u8bbe\u7f6e\u4e2d\u586b\u5199 API Key")
         self.api_key = api_key.strip()
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        self.image_proxy_url = image_proxy_url.strip() if image_proxy_url else ""
         self._client: httpx.AsyncClient | None = None
 
     async def __aenter__(self) -> "NoovaClient":
@@ -136,33 +137,21 @@ class NoovaClient:
         return base64.b64encode(data).decode("utf-8")
 
     async def upload_image_direct(self, file_path: Path) -> str:
-        """Upload an image to object storage via the STS presigned-URL flow.
+        """Upload an image to the configured image proxy (multipart/form-data)
+        and return the public URL.
 
-        1. GET /v1/client/resource/sts -> presigned upload_url + final file_url
-        2. PUT the (resized) image bytes to upload_url
-        3. Return file_url, a public URL passed to the draw API in the model's image field.
+        The image is resized via _prepare_image_bytes (max 2048px, JPEG q85),
+        then POSTed as a `file` field to image_proxy_url. The proxy returns
+        {"url": "...", "created": ...}; we return that url.
 
-        Falls back to a data: URL only if STS does not return an upload_url.
+        Falls back to a data: URL when no image_proxy_url is configured.
         """
+        if not self.image_proxy_url:
+            return "data:image/jpeg;base64," + self.encode_image_base64(file_path)
+
         data, content_type = self._prepare_image_bytes(file_path)
-        size = len(data)
         ext = "jpg" if content_type == "image/jpeg" else "png"
         filename = f"{file_path.stem or 'image'}_{uuid.uuid4().hex[:8]}.{ext}"
-
-        sts = await self._request(
-            "GET",
-            "/v1/client/resource/sts",
-            params={"filename": filename, "content_type": content_type, "size": str(size)},
-            headers=self._headers(),
-        )
-        data_obj = sts.get("data") if isinstance(sts, dict) else {}
-        upload_url = data_obj.get("upload_url") if isinstance(data_obj, dict) else None
-        file_url = data_obj.get("file_url") if isinstance(data_obj, dict) else None
-        if not upload_url or not file_url:
-            # Service did not return a presigned URL; fall back to base64 data URL.
-            return "data:" + content_type + ";base64," + self.encode_image_base64(file_path)
-
-        req_headers = data_obj.get("headers") or {"Content-Type": content_type}
 
         owns_client = self._client is None
         client = self._client or httpx.AsyncClient(
@@ -171,16 +160,27 @@ class NoovaClient:
             headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
         )
         try:
-            response = await client.put(upload_url, content=data, headers=req_headers)
+            response = await client.post(
+                self.image_proxy_url,
+                files={"file": (filename, data, content_type)},
+            )
         finally:
             if owns_client:
                 await client.aclose()
+
         if response.status_code >= 400:
             raise NoovaApiError(
-                f"\u76f4\u4f20\u5931\u8d25 ({response.status_code}): {response.text[:300]}",
+                f"\u56fe\u5e8a\u4e0a\u4f20\u5931\u8d25 ({response.status_code}): {response.text[:300]}",
                 status_code=response.status_code,
             )
-        return file_url
+        try:
+            payload = response.json()
+        except ValueError:
+            raise NoovaApiError(f"\u56fe\u5e8a\u8fd4\u56de\u975e JSON: {response.text[:300]}")
+        url = payload.get("url") if isinstance(payload, dict) else None
+        if not url:
+            raise NoovaApiError(f"\u56fe\u5e8a\u672a\u8fd4\u56de url: {payload}")
+        return str(url)
 
     async def verify_connection(self) -> None:
         """Verify API key and connectivity."""
@@ -211,10 +211,10 @@ class NoovaClient:
         urls: list of image URLs (from upload_image_direct) OR data: URLs/base64.
         All models go to /v1/draw/completions.
         gpt-image-2 gets quality param, nano-banana does not.
-        The image field name is model-specific: gpt-image-2 uses `images`,
-        nano-banana models use `urls`."""
-        # gpt-image-2 family accepts URLs only in the `images` field; the
-        # nano-banana family uses `urls`. See backend.config.get_model_image_param.
+        The image field name is model-specific and resolved via
+        backend.config.get_model_image_param (all current models use `urls`)."""
+        # The image field name is model-specific; all current models use
+        # `urls`. See backend.config.get_model_image_param.
         from .config import get_model_image_param
         image_param = get_model_image_param(model)
         body: dict[str, Any] = {
@@ -268,12 +268,15 @@ class NoovaClient:
         task_id: str,
         poll_interval: int,
         cancel_check=None,
+        poll_timeout: float = 300.0,
     ) -> dict[str, Any]:
-        """Poll until task completes or fails.
-        cancel_check: optional async/await callable returning True to abort."""
+        """Poll until task completes, fails, or poll_timeout elapses.
+        cancel_check: optional async/await callable returning True to abort.
+        poll_timeout: max wall-clock seconds to wait (default 300)."""
         import asyncio
         poll_url = f"/v1/draw/result"
-        for _ in range(MAX_POLL_RETRIES):
+        deadline = asyncio.get_event_loop().time() + max(1.0, poll_timeout)
+        while asyncio.get_event_loop().time() < deadline:
             if cancel_check:
                 try:
                     if await cancel_check():
@@ -315,7 +318,7 @@ class NoovaClient:
             if status in {"succeeded", "failed", "violation", "cancelled"}:
                 return data
 
-        raise NoovaApiError(f"\u8f6e\u8be2\u8d85\u65f6\uff08{MAX_POLL_RETRIES * poll_interval} \u79d2\uff09")
+        raise NoovaApiError(f"\u8f6e\u8be2\u8d85\u65f6\uff08{int(poll_timeout)} \u79d2\uff09")
 
     # ---- download ----
 

@@ -46,6 +46,7 @@ const el = {
   apiKey: document.getElementById("api-key"),
   apiKeyHint: document.getElementById("api-key-hint"),
   baseUrl: document.getElementById("base-url"),
+  imageProxyUrl: document.getElementById("image-proxy-url"),
   settingsModel: document.getElementById("settings-model"),
   settingsModelCustom: document.getElementById("settings-model-custom"),
   settingsAspectRatio: document.getElementById("settings-aspect-ratio"),
@@ -541,9 +542,10 @@ async function loadSettings() {
       : "尚未配置 API Key";
   }
   el.baseUrl.value = s.base_url || "https://noova.cn";
+  if (el.imageProxyUrl) el.imageProxyUrl.value = s.image_proxy_url || "";
   applyModelValue(el.settingsModel, el.settingsModelCustom, s.model || "gpt-image-2");
-  el.settingsConcurrency.value = s.concurrency || 2;
-  el.settingsPollInterval.value = s.poll_interval_sec || 3;
+  el.settingsConcurrency.value = s.concurrency || 10;
+  el.settingsPollInterval.value = s.poll_interval_sec || 20;
   el.settingsPollTimeout.value = s.poll_timeout_sec || 300;
   el.settingsSourceDir.value = s.source_dir || "";
   el.settingsOutputDir.value = s.output_dir || "";
@@ -558,26 +560,27 @@ async function loadSettings() {
     el.model.value = options.includes(savedModel) ? savedModel : (options[0] || "gpt-image-2");
   }
   if (el.aspectRatio && el.imageSize) {
-    updateModelDependentOptions(el.model, el.aspectRatio, el.imageSize, s.aspect_ratio || "1:1", s.image_size || "", el.quality);
+    updateModelDependentOptions(el.model, el.aspectRatio, el.imageSize, s.aspect_ratio || "9:16", s.image_size || "", el.quality);
   }
   if (el.settingsModel && el.settingsAspectRatio && el.settingsImageSize) {
-    updateModelDependentOptions(el.settingsModel, el.settingsAspectRatio, el.settingsImageSize, s.aspect_ratio || "1:1", s.image_size || "", el.settingsQuality);
+    updateModelDependentOptions(el.settingsModel, el.settingsAspectRatio, el.settingsImageSize, s.aspect_ratio || "9:16", s.image_size || "", el.settingsQuality);
   }
   el.settingsQuality.value = s.quality || "auto";
   el.quality.value = s.quality || "auto";
-  el.concurrency.value = s.concurrency || 2;
-  if (el.pollInterval) el.pollInterval.value = s.poll_interval_sec || 3;
+  el.concurrency.value = s.concurrency || 10;
+  if (el.pollInterval) el.pollInterval.value = s.poll_interval_sec || 20;
 }
 
 async function saveSettings() {
   const body = {
     base_url: el.baseUrl.value.trim() || "https://noova.cn",
+    image_proxy_url: el.imageProxyUrl ? el.imageProxyUrl.value.trim() : "",
     model: selectedSettingsModel(),
     aspect_ratio: el.settingsAspectRatio.value,
     quality: el.settingsQuality.value,
     image_size: el.settingsImageSize ? el.settingsImageSize.value : "",
-    concurrency: Number(el.settingsConcurrency.value || 2),
-    poll_interval_sec: Number(el.settingsPollInterval.value || 3),
+    concurrency: Number(el.settingsConcurrency.value || 10),
+    poll_interval_sec: Number(el.settingsPollInterval.value || 20),
     poll_timeout_sec: Number(el.settingsPollTimeout.value || 300),
     source_dir: el.settingsSourceDir.value.trim(),
     output_dir: el.settingsOutputDir.value.trim(),
@@ -690,8 +693,8 @@ async function startJob() {
     aspect_ratio: el.aspectRatio.value,
     quality: el.quality.value,
     image_size: el.imageSize ? el.imageSize.value : "",
-    concurrency: Number(el.concurrency.value || 2),
-    poll_interval_sec: Number(el.pollInterval?.value || 3),
+    concurrency: Number(el.concurrency.value || 10),
+    poll_interval_sec: Number(el.pollInterval?.value || 20),
     prompts,
   };
 

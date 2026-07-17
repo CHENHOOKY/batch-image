@@ -73,7 +73,7 @@
 
             <label class="field compact narrow">
               <span>轮询时间(秒)</span>
-              <input id="poll-interval" type="number" min="1" max="60" value="3" />
+              <input id="poll-interval" type="number" min="1" max="60" value="20" />
             </label>
 
             <label class="field compact">
@@ -93,7 +93,7 @@
 
             <label class="field compact narrow">
               <span>并发</span>
-              <input id="concurrency" type="number" min="1" max="10" value="2" />
+              <input id="concurrency" type="number" min="1" max="10" value="10" />
             </label>
             </div>
           </div>
@@ -221,6 +221,12 @@
           <label class="field field-span-2">
             <span>API Base URL</span>
             <input id="base-url" type="text" placeholder="https://noova.cn" />
+          </label>
+
+          <label class="field field-span-2">
+            <span>图床 API URL</span>
+            <input id="image-proxy-url" type="text" placeholder="https://imageproxy.zhongzhuan.chat/api/upload" />
+            <span class="field-hint">图片上传地址，留空则回退到 base64 内嵌</span>
           </label>
 
           <label class="field">

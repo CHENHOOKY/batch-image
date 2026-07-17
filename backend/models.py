@@ -17,6 +17,7 @@ class SettingsUpdate(BaseModel):
     poll_timeout_sec: int | None = Field(default=None, ge=30, le=3600)
     source_dir: str | None = None
     output_dir: str | None = None
+    image_proxy_url: str | None = None
 
 
 class PromptItem(BaseModel):
@@ -24,6 +25,7 @@ class PromptItem(BaseModel):
     enabled: bool = True
     source_dir: str | None = None
     output_dir: str | None = None
+    image_proxy_url: str | None = None
     extra_image_1: str | None = None
     extra_image_2: str | None = None
     # 兼容旧前端字段
@@ -41,6 +43,7 @@ class PromptItem(BaseModel):
 class BatchJobCreate(BaseModel):
     source_dir: str | None = None
     output_dir: str | None = None
+    image_proxy_url: str | None = None
     model: str | None = None
     aspect_ratio: str | None = None
     quality: str | None = None
