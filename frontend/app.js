@@ -1,4 +1,4 @@
-const state = {
+﻿const state = {
   options: {
     models: [
       { id: "gpt-image-2", name: "gpt-image-2", aspect_ratios: ["1:1","16:9","9:16","4:3","3:4","3:2","2:3","5:4","4:5","21:9","9:21","1:2","2:1"], image_sizes: [], supports_quality: true },
@@ -57,6 +57,9 @@ const el = {
   settingsSourceDir: document.getElementById("settings-source-dir"),
   settingsOutputDir: document.getElementById("settings-output-dir"),
   settingsMessage: document.getElementById("settings-message"),
+  creditBadge: document.getElementById("credit-badge"),
+  creditValue: document.getElementById("credit-value"),
+  btnRefreshCredit: document.getElementById("btn-refresh-credit"),
 };
 
 function statusLabel(status) {
@@ -94,7 +97,7 @@ async function api(path, options = {}) {
 
   if (!response.ok) {
     const detail =
-      (payload && (payload.detail || payload.message)) ||
+      (payload ? (payload.detail || payload.message) : null) ||
       `请求失败 (${response.status})`;
     throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
   }
@@ -845,6 +848,24 @@ function renderJob(job) {
   if (el.btnDelete) el.btnDelete.disabled = ["queued", "running"].includes(job.status);
 }
 
+async function fetchCredit() {
+  const badge = el.creditBadge;
+  const valueEl = el.creditValue;
+  badge.classList.add("loading");
+  try {
+    const resp = await api("/api/credit");
+    if (resp && resp.data) {
+      valueEl.textContent = Number(resp.data.remaining_total).toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    } else {
+      valueEl.textContent = "--";
+    }
+  } catch (err) {
+    valueEl.textContent = "--";
+  } finally {
+    badge.classList.remove("loading");
+  }
+}
+
 function bindEvents() {
   document.getElementById("btn-open-settings").addEventListener("click", openSettings);
   document.getElementById("btn-close-settings").addEventListener("click", closeSettings);
@@ -944,6 +965,7 @@ function bindEvents() {
       setActionMessage(err.message || String(err), true);
     }
   });
+  document.getElementById("btn-refresh-credit").addEventListener("click", async () => { try { await fetchCredit(); } catch (_) {} });
   document.getElementById("btn-refresh-job").addEventListener("click", async () => {
     try {
       await refreshJob();
@@ -969,6 +991,7 @@ async function init() {
     window.refreshIcons();
   }
   await loadOptions();
+  await fetchCredit();
   try {
     await loadSettings();
   } catch (err) {
@@ -980,3 +1003,5 @@ async function init() {
 }
 
 init();
+
+

@@ -458,6 +458,7 @@ class JobManager:
         poll_timeout = float(settings.get("poll_timeout_sec") or 300)
         semaphore = asyncio.Semaphore(job.concurrency)
         image_cache: dict[str, str] = {}
+        cache_lock = asyncio.Lock()
 
         # Pre-upload fixed reference images via STS direct upload (once per unique image)
         fixed_url_lookup: dict[str, str] = {}
@@ -563,10 +564,11 @@ class JobManager:
             task.status = "uploading"
             task.message = "upload: " + fname
             cache_key = str(image_path)
-            source_url = image_cache.get(cache_key)
-            if source_url is None:
-                source_url = await client.upload_image_direct(image_path)
-                image_cache[cache_key] = source_url
+            async with cache_lock:
+                source_url = image_cache.get(cache_key)
+                if source_url is None:
+                    source_url = await client.upload_image_direct(image_path)
+                    image_cache[cache_key] = source_url
 
             if job.cancel_flag:
                 task.status = "cancelled"

@@ -29,30 +29,32 @@ frontend_dir = BASE_DIR / "frontend"
 # --- Non-blocking folder/file picker sessions ---
 
 _pick_sessions: dict[str, dict[str, Any]] = {}
+_pick_lock = asyncio.Lock()
 _PICK_SESSION_TTL = 300  # 5 minutes
 
 
-def _cleanup_pick_sessions() -> None:
+async def _cleanup_pick_sessions() -> None:
     """Remove expired or excess pick sessions."""
-    now = time.monotonic()
-    expired = [
-        sid for sid, s in _pick_sessions.items()
-        if s.get("done") and now - s.get("_completed_at", now) > 30
-    ]
-    for sid in expired:
-        _pick_sessions.pop(sid, None)
-    # Also remove very old incomplete sessions (user abandoned)
-    stale = [
-        sid for sid, s in _pick_sessions.items()
-        if not s.get("done") and now - s.get("_created_at", now) > _PICK_SESSION_TTL
-    ]
-    for sid in stale:
-        _pick_sessions.pop(sid, None)
-    # Keep at most 5 sessions
-    if len(_pick_sessions) > 5:
-        done_ids = [sid for sid, s in _pick_sessions.items() if s.get("done")]
-        for old_id in done_ids[:len(_pick_sessions) - 5]:
-            _pick_sessions.pop(old_id, None)
+    async with _pick_lock:
+        now = time.monotonic()
+        expired = [
+            sid for sid, s in _pick_sessions.items()
+            if s.get("done") and now - s.get("_completed_at", now) > 30
+        ]
+        for sid in expired:
+            _pick_sessions.pop(sid, None)
+        # Also remove very old incomplete sessions (user abandoned)
+        stale = [
+            sid for sid, s in _pick_sessions.items()
+            if not s.get("done") and now - s.get("_created_at", now) > _PICK_SESSION_TTL
+        ]
+        for sid in stale:
+            _pick_sessions.pop(sid, None)
+        # Keep at most 5 sessions
+        if len(_pick_sessions) > 5:
+            done_ids = [sid for sid, s in _pick_sessions.items() if s.get("done")]
+            for old_id in done_ids[:len(_pick_sessions) - 5]:
+                _pick_sessions.pop(old_id, None)
 
 
 async def _run_folder_picker(session_id: str, title: str, initial: str) -> None:
@@ -86,18 +88,21 @@ async def _run_folder_picker(session_id: str, title: str, initial: str) -> None:
     try:
         loop = asyncio.get_running_loop()
         selected = await loop.run_in_executor(None, _pick)
-        if selected:
-            path = Path(selected).expanduser().resolve()
-            _pick_sessions[session_id]["result"] = str(path)
-            _pick_sessions[session_id]["cancelled"] = False
-        else:
-            _pick_sessions[session_id]["result"] = None
-            _pick_sessions[session_id]["cancelled"] = True
+        async with _pick_lock:
+            if selected:
+                path = Path(selected).expanduser().resolve()
+                _pick_sessions[session_id]["result"] = str(path)
+                _pick_sessions[session_id]["cancelled"] = False
+            else:
+                _pick_sessions[session_id]["result"] = None
+                _pick_sessions[session_id]["cancelled"] = True
     except Exception as exc:
-        _pick_sessions[session_id]["error"] = str(exc)
+        async with _pick_lock:
+            _pick_sessions[session_id]["error"] = str(exc)
     finally:
-        _pick_sessions[session_id]["done"] = True
-        _pick_sessions[session_id]["_completed_at"] = time.monotonic()
+        async with _pick_lock:
+            _pick_sessions[session_id]["done"] = True
+            _pick_sessions[session_id]["_completed_at"] = time.monotonic()
 
 
 async def _run_file_picker(session_id: str, title: str, initial: str) -> None:
@@ -143,22 +148,25 @@ async def _run_file_picker(session_id: str, title: str, initial: str) -> None:
     try:
         loop = asyncio.get_running_loop()
         selected = await loop.run_in_executor(None, _pick)
-        if selected:
-            path = Path(selected).expanduser().resolve()
-            if path.exists() and path.is_file():
-                _pick_sessions[session_id]["result"] = str(path)
-                _pick_sessions[session_id]["cancelled"] = False
+        async with _pick_lock:
+            if selected:
+                path = Path(selected).expanduser().resolve()
+                if path.exists() and path.is_file():
+                    _pick_sessions[session_id]["result"] = str(path)
+                    _pick_sessions[session_id]["cancelled"] = False
+                else:
+                    _pick_sessions[session_id]["error"] = f"文件不存在: {path}"
+                    _pick_sessions[session_id]["cancelled"] = True
             else:
-                _pick_sessions[session_id]["error"] = f"文件不存在: {path}"
+                _pick_sessions[session_id]["result"] = None
                 _pick_sessions[session_id]["cancelled"] = True
-        else:
-            _pick_sessions[session_id]["result"] = None
-            _pick_sessions[session_id]["cancelled"] = True
     except Exception as exc:
-        _pick_sessions[session_id]["error"] = str(exc)
+        async with _pick_lock:
+            _pick_sessions[session_id]["error"] = str(exc)
     finally:
-        _pick_sessions[session_id]["done"] = True
-        _pick_sessions[session_id]["_completed_at"] = time.monotonic()
+        async with _pick_lock:
+            _pick_sessions[session_id]["done"] = True
+            _pick_sessions[session_id]["_completed_at"] = time.monotonic()
 
 
 # --- Routes ---
@@ -225,7 +233,7 @@ async def scan_folder(body: dict[str, Any]) -> ApiResponse:
 @app.post("/api/folder/pick")
 async def start_pick_folder(body: dict[str, Any] | None = None) -> ApiResponse:
     """Start a non-blocking folder picker dialog. Returns session_id for polling."""
-    _cleanup_pick_sessions()
+    await _cleanup_pick_sessions()
 
     payload = body or {}
     title = str(payload.get("title") or "选择文件夹")
@@ -253,7 +261,7 @@ async def start_pick_folder(body: dict[str, Any] | None = None) -> ApiResponse:
 @app.post("/api/file/pick")
 async def start_pick_file(body: dict[str, Any] | None = None) -> ApiResponse:
     """Start a non-blocking file picker dialog. Returns session_id for polling."""
-    _cleanup_pick_sessions()
+    await _cleanup_pick_sessions()
 
     payload = body or {}
     title = str(payload.get("title") or "选择图片")
@@ -281,7 +289,7 @@ async def start_pick_file(body: dict[str, Any] | None = None) -> ApiResponse:
 @app.get("/api/pick/{session_id}")
 async def poll_pick(session_id: str) -> ApiResponse:
     """Poll for the result of a folder/file picker session."""
-    _cleanup_pick_sessions()
+    await _cleanup_pick_sessions()
 
     session = _pick_sessions.get(session_id)
     if not session:
@@ -350,6 +358,43 @@ async def cancel_job(job_id: str) -> ApiResponse:
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
+@app.get("/api/credit")
+async def get_credit() -> ApiResponse:
+    """Proxy Noova credit balance query via stored API key."""
+    import httpx
+
+    settings = load_settings()
+    api_key = str(settings.get("api_key") or "").strip()
+    base_url = str(settings.get("base_url") or "https://noova.cn").rstrip("/")
+
+    if not api_key:
+        raise HTTPException(status_code=400, detail="请先在设置中填写 API Key")
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=15.0, read=30.0, write=30.0, pool=15.0),
+            follow_redirects=True,
+        ) as client:
+            resp = await client.get(
+                f"{base_url}/api/v1/gateway/credit",
+                headers={"Authorization": f"Bearer {api_key}"},
+            )
+            data = resp.json()
+    except httpx.ConnectError as exc:
+        raise HTTPException(status_code=502, detail="无法连接到积分服务，请检查网络") from exc
+    except httpx.TimeoutException as exc:
+        raise HTTPException(status_code=504, detail="积分接口请求超时") from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"请求积分接口失败: {exc}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail=f"积分接口返回格式异常: {exc}") from exc
+
+    if resp.status_code != 200:
+        msg = data.get("message", f"积分接口返回 {resp.status_code}") if isinstance(data, dict) else f"积分接口返回 {resp.status_code}"
+        raise HTTPException(status_code=resp.status_code, detail=msg)
+
+    return ApiResponse(message=data.get("message", "获取积分成功"), data=data.get("data"))
+
 
 @app.delete("/api/jobs/{job_id}")
 async def delete_job(job_id: str) -> ApiResponse:
@@ -380,7 +425,7 @@ async def resolve_folder_prefix(body: dict[str, Any]) -> ApiResponse:
     if not fname or not rel:
         raise HTTPException(status_code=400, detail="filename / relative_path required")
 
-    dir_prefix = rel[: -len(fname)].rstrip("/").rstrip("\\")
+    dir_prefix = rel[: -len(fname)].lstrip("/").lstrip("\\")
     import os as _os
     _matched = None
 
@@ -435,10 +480,12 @@ async def resolve_file_abs(body: dict[str, Any]) -> ApiResponse:
     import os as _os
     roots = {str(BASE_DIR)}
     try:
-        _p = next(iter(roots))
         roots.add(_os.path.expanduser("~"))
         if _platform.system() == "Windows":
-            roots.add("C:\\")
+            for sub in ("Desktop", "Documents", "Downloads", "Pictures"):
+                d = _os.path.join(_os.path.expanduser("~"), sub)
+                if _os.path.isdir(d):
+                    roots.add(d)
     except Exception:
         pass
     for sysroot in roots:
@@ -462,3 +509,5 @@ async def resolve_file_abs(body: dict[str, Any]) -> ApiResponse:
 
 if frontend_dir.exists():
     app.mount("/", StaticFiles(directory=str(frontend_dir), html=True), name="frontend")
+
+

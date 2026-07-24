@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
@@ -18,6 +18,16 @@
             <h1>批量出图</h1>
             <p class="subtitle">本地批量 · 多提示词 · 自动归档</p>
           </div>
+        </div>
+                <div class="credit-badge" id="credit-badge" title="积分余额">
+          <i data-lucide="coins"></i>
+          <div class="credit-info">
+            <span class="credit-label">积分余额</span>
+            <span class="credit-value" id="credit-value">--</span>
+          </div>
+          <button id="btn-refresh-credit" class="btn ghost icon-only" type="button" title="刷新积分">
+            <i data-lucide="refresh-cw"></i>
+          </button>
         </div>
         <div class="top-actions">
           <button id="btn-refresh-job" class="btn ghost icon-btn" type="button" title="刷新进度">
@@ -317,3 +327,5 @@
     </script>
   </body>
 </html>
+
+

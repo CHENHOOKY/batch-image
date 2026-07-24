@@ -1,4 +1,4 @@
-:root {
+﻿:root {
   --bg: #efe6d6;
   --bg-deep: #e7dcc8;
   --panel: #fbf6ec;
@@ -769,4 +769,76 @@ tr.task-active .status {
 @keyframes pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.6; }
+}
+/* Credit badge */
+.credit-badge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: linear-gradient(180deg, #fffdf8, #f7efe3);
+  box-shadow: 0 2px 8px rgba(106, 70, 42, 0.06);
+}
+
+.credit-badge > svg {
+  width: 18px;
+  height: 18px;
+  color: #a06b43;
+  flex: 0 0 auto;
+}
+
+.credit-badge .credit-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.credit-badge .credit-label {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--muted);
+  letter-spacing: 0.02em;
+}
+
+.credit-badge .credit-value {
+  font-size: 15px;
+  font-weight: 700;
+  color: #3a2f24;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.credit-badge .btn {
+  width: 30px;
+  min-width: 30px;
+  height: 30px;
+  padding: 0;
+  border-radius: 6px;
+}
+
+.credit-badge .btn svg {
+  width: 14px;
+  height: 14px;
+}
+
+.credit-badge.loading .credit-value {
+  opacity: 0.5;
+}
+
+.credit-badge.loading .btn svg {
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (max-width: 760px) {
+  .credit-badge {
+    align-self: stretch;
+    justify-content: space-between;
+  }
 }

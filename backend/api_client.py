@@ -240,7 +240,7 @@ class NoovaClient:
                     headers=self._headers(),
                 )
                 break
-            except (httpx.TimeoutException, httpx.ConnectError, ConnectionResetError) as exc:
+            except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError, ConnectionResetError) as exc:
                 last_exc = exc
                 if attempt < 4:
                     import asyncio
