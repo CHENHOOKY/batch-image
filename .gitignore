@@ -10,6 +10,9 @@ data/
 
 # Generated outputs
 outputs/
+output/
+*.log
+.playwright-cli/
 
 # PyInstaller build artifacts
 build/

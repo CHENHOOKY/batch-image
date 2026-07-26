@@ -17,6 +17,7 @@ from .config import (
     load_settings,
     public_settings,
     save_settings,
+    validate_external_http_url,
 )
 from .job_manager import job_manager
 from .models import ApiResponse, BatchJobCreate, SettingsUpdate
@@ -365,7 +366,13 @@ async def get_credit() -> ApiResponse:
 
     settings = load_settings()
     api_key = str(settings.get("api_key") or "").strip()
-    base_url = str(settings.get("base_url") or "https://noova.cn").rstrip("/")
+    try:
+        base_url = validate_external_http_url(
+            str(settings.get("base_url") or "https://noova.cn"),
+            field_name="API Base URL",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     if not api_key:
         raise HTTPException(status_code=400, detail="请先在设置中填写 API Key")
@@ -373,12 +380,14 @@ async def get_credit() -> ApiResponse:
     try:
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(connect=15.0, read=30.0, write=30.0, pool=15.0),
-            follow_redirects=True,
+            follow_redirects=False,
         ) as client:
             resp = await client.get(
                 f"{base_url}/api/v1/gateway/credit",
                 headers={"Authorization": f"Bearer {api_key}"},
             )
+            if 300 <= resp.status_code < 400:
+                raise HTTPException(status_code=502, detail="积分服务发生重定向，请检查 API Base URL")
             data = resp.json()
     except httpx.ConnectError as exc:
         raise HTTPException(status_code=502, detail="无法连接到积分服务，请检查网络") from exc
@@ -414,6 +423,43 @@ async def delete_job(job_id: str) -> ApiResponse:
 
 import subprocess as _subprocess
 import platform as _platform
+import os as _os
+
+_RESOLVE_MAX_DIRS_PER_ROOT = 800
+
+
+def _same_file_metadata(path: Path, size: Any = None, last_modified: Any = None) -> bool:
+    try:
+        stat = path.stat()
+    except OSError:
+        return False
+    if size is not None:
+        try:
+            if stat.st_size != int(size):
+                return False
+        except (TypeError, ValueError):
+            return False
+    if last_modified is not None:
+        try:
+            browser_mtime = float(last_modified) / 1000.0
+            if abs(stat.st_mtime - browser_mtime) > 2.0:
+                return False
+        except (TypeError, ValueError):
+            pass
+    return True
+
+
+def _limited_walk(root: str):
+    scanned = 0
+    for dirpath, dirnames, filenames in _os.walk(root):
+        dirnames[:] = [
+            name for name in dirnames
+            if name not in {"node_modules", ".git", "__pycache__", "data", "outputs"}
+        ]
+        scanned += 1
+        if scanned > _RESOLVE_MAX_DIRS_PER_ROOT:
+            break
+        yield dirpath, filenames
 
 @app.post("/api/folder/resolve-prefix")
 async def resolve_folder_prefix(body: dict[str, Any]) -> ApiResponse:
@@ -422,6 +468,8 @@ async def resolve_folder_prefix(body: dict[str, Any]) -> ApiResponse:
     inside likely roots (exe dir, desktop, home)."""
     fname = str(body.get("filename") or "").strip()
     rel = str(body.get("relative_path") or "").strip()
+    size = body.get("size")
+    last_modified = body.get("lastModified")
     if not fname or not rel:
         raise HTTPException(status_code=400, detail="filename / relative_path required")
 
@@ -441,14 +489,17 @@ async def resolve_folder_prefix(body: dict[str, Any]) -> ApiResponse:
                 break
             cur = parent
         roots.append(_os.path.join(_os.path.expanduser("~"), "Desktop"))
-        roots.append(_os.path.expanduser("~"))
+        # Avoid recursively scanning the entire home directory.
     except Exception:
         roots = [str(BASE_DIR)]
 
     for sysroot in roots:
         try:
-            for dirpath, _dirnames, filenames in _os.walk(sysroot):
+            for dirpath, filenames in _limited_walk(sysroot):
                 if fname in filenames:
+                    candidate = Path(dirpath) / fname
+                    if not _same_file_metadata(candidate, size, last_modified):
+                        continue
                     # If the relative prefix matches, prefer that
                     norm = dirpath.replace("\\", "/")
                     if dir_prefix and norm.endswith("/" + dir_prefix):
@@ -475,12 +526,13 @@ async def resolve_file_abs(body: dict[str, Any]) -> ApiResponse:
     in the workspace.  The browser only sends filename/size/type/lastModified,
     so we best-effort locate the file."""
     fname = str(body.get("filename") or "").strip()
+    size = body.get("size")
+    last_modified = body.get("lastModified")
     if not fname:
         raise HTTPException(status_code=400, detail="filename required")
     import os as _os
     roots = {str(BASE_DIR)}
     try:
-        roots.add(_os.path.expanduser("~"))
         if _platform.system() == "Windows":
             for sub in ("Desktop", "Documents", "Downloads", "Pictures"):
                 d = _os.path.join(_os.path.expanduser("~"), sub)
@@ -490,19 +542,11 @@ async def resolve_file_abs(body: dict[str, Any]) -> ApiResponse:
         pass
     for sysroot in roots:
         try:
-            if _platform.system() == "Windows":
-                result = _subprocess.run(
-                    ["cmd", "/c", "where", "/r", f"{sysroot}", fname],
-                    capture_output=True, encoding="gbk", errors="replace", timeout=20,
-                )
-            else:
-                result = _subprocess.run(
-                    ["find", sysroot, "-name", fname, "-maxdepth", 15],
-                    capture_output=True, encoding="gbk", errors="replace", timeout=20,
-                )
-            lines = [l.strip() for l in result.stdout.splitlines() if l.strip()]
-            if lines:
-                return ApiResponse(data={"path": lines[0]})
+            for dirpath, filenames in _limited_walk(sysroot):
+                if fname in filenames:
+                    candidate = Path(dirpath) / fname
+                    if _same_file_metadata(candidate, size, last_modified):
+                        return ApiResponse(data={"path": str(candidate)})
         except Exception:
             continue
     return ApiResponse(data={"path": ""})

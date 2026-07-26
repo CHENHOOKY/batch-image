@@ -2,10 +2,9 @@
   options: {
     models: [
       { id: "gpt-image-2", name: "gpt-image-2", aspect_ratios: ["1:1","16:9","9:16","4:3","3:4","3:2","2:3","5:4","4:5","21:9","9:21","1:2","2:1"], image_sizes: [], supports_quality: true },
+      { id: "gpt-image-2-G", name: "gpt-image-2-G", aspect_ratios: ["auto","1:1","16:9","9:16","4:3","3:4","3:2","2:3","5:4","4:5","21:9","9:21","1:2","2:1"], image_sizes: ["1K"], supports_quality: true, poll_timeout_sec: 960 },
       { id: "nano-banana-2", name: "nano-banana-2", aspect_ratios: ["auto","1:1","16:9","9:16","4:3","3:4","3:2","2:3","5:4","4:5","21:9","1:4","4:1","1:8","8:1"], image_sizes: ["1K","2K","4K"], supports_quality: false },
       { id: "nano-banana-pro", name: "nano-banana-pro", aspect_ratios: ["auto","1:1","16:9","9:16","4:3","3:4","3:2","2:3","5:4","4:5","21:9"], image_sizes: ["1K","2K","4K"], supports_quality: false },
-      { id: "nano-banana-fast", name: "nano-banana-fast", aspect_ratios: ["auto","1:1","16:9","9:16","4:3","3:4","3:2","2:3","5:4","4:5","21:9"], image_sizes: ["1K"], supports_quality: false },
-      { id: "nano-banana", name: "nano-banana", aspect_ratios: ["auto","1:1","16:9","9:16","4:3","3:4","3:2","2:3","5:4","4:5","21:9"], image_sizes: [], supports_quality: false },
     ],
     qualities: ["auto", "low", "medium", "high"],
   },
@@ -14,6 +13,8 @@
   currentJobId: null,
   pollTimer: null,
   pollInFlight: false,
+  lastTaskRenderSignature: "",
+  lastFocusedElement: null,
   apiKeySet: false,
 };
 
@@ -36,6 +37,8 @@ const el = {
   statPending: document.getElementById("stat-pending"),
   progressFill: document.getElementById("progress-fill"),
   progressText: document.getElementById("progress-text"),
+  resultsGrid: document.getElementById("results-grid"),
+  resultsCount: document.getElementById("results-count"),
   taskTbody: document.getElementById("task-tbody"),
   btnStart: document.getElementById("btn-start"),
   btnCancel: document.getElementById("btn-cancel"),
@@ -441,6 +444,109 @@ function escapeHtml(text) {
     .replaceAll('"', "&quot;");
 }
 
+function safeStatusClass(status) {
+  const value = String(status || "").trim();
+  return /^[a-z0-9_-]+$/i.test(value) ? value : "unknown";
+}
+
+function isHttpUrl(value) {
+  try {
+    const url = new URL(String(value || ""));
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch (_) {
+    return false;
+  }
+}
+
+function applyModelTimeoutHint(modelId, timeoutInput) {
+  if (!timeoutInput) return;
+  const modelTimeout = Number(getModelInfo(modelId).poll_timeout_sec || 0);
+  timeoutInput.min = String(modelTimeout || 30);
+  if (!modelTimeout) return;
+  const currentTimeout = Number(timeoutInput.value || 0);
+  if (currentTimeout < modelTimeout) {
+    timeoutInput.value = modelTimeout;
+  }
+}
+
+function appendTextNode(parent, tag, className, text, title = "") {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  node.textContent = text;
+  if (title) node.title = title;
+  parent.appendChild(node);
+  return node;
+}
+
+function renderResultCards(tasks) {
+  if (!el.resultsGrid) return;
+  el.resultsGrid.replaceChildren();
+
+  if (!tasks.length) {
+    appendTextNode(
+      el.resultsGrid,
+      "div",
+      "results-empty",
+      "创建任务后，这里会按图片展示处理结果。"
+    );
+    return;
+  }
+
+  tasks.forEach((task) => {
+    const statusClass = safeStatusClass(task.status);
+    const output = task.output_path || task.result_url || "尚未生成";
+
+    const card = document.createElement("article");
+    card.className = `result-card ${statusClass}`;
+
+    const head = document.createElement("div");
+    head.className = "result-card-head";
+    appendTextNode(head, "span", "result-name", task.image_name || "未命名图片", task.image_name || "");
+
+    const status = document.createElement("span");
+    status.className = `status ${statusClass}`;
+    status.textContent = statusLabel(task.status);
+    head.appendChild(status);
+    card.appendChild(head);
+
+    appendTextNode(
+      card,
+      "p",
+      "result-prompt",
+      task.prompt || task.prompt_name || "未填写提示词",
+      task.prompt || ""
+    );
+    appendTextNode(card, "div", "result-message", task.message || "等待处理");
+
+    if (task.result_url && isHttpUrl(task.result_url)) {
+      const preview = document.createElement("img");
+      preview.className = "result-preview";
+      preview.src = task.result_url;
+      preview.alt = `${task.image_name || "生成结果"} 预览`;
+      preview.loading = "lazy";
+      preview.referrerPolicy = "no-referrer";
+      preview.addEventListener("error", () => preview.remove());
+      card.appendChild(preview);
+    }
+
+    const outputWrap = document.createElement("div");
+    outputWrap.className = "result-output";
+    appendTextNode(outputWrap, "span", "result-output-label", "输出");
+    if (task.result_url && isHttpUrl(task.result_url)) {
+      const link = document.createElement("a");
+      link.className = "result-link";
+      link.href = task.result_url;
+      link.target = "_blank";
+      link.rel = "noopener";
+      link.textContent = "打开图片";
+      outputWrap.appendChild(link);
+    }
+    appendTextNode(outputWrap, "span", "result-path", output, output);
+    card.appendChild(outputWrap);
+    el.resultsGrid.appendChild(card);
+  });
+}
+
 function setActionMessage(message, isError = false) {
   el.actionMessage.textContent = message || "";
   el.actionMessage.style.color = isError ? "#b42318" : "";
@@ -452,13 +558,19 @@ function setSettingsMessage(message, isError = false) {
 }
 
 function openSettings() {
+  state.lastFocusedElement = document.activeElement;
   el.settingsModal.classList.remove("hidden");
   el.settingsModal.setAttribute("aria-hidden", "false");
+  requestAnimationFrame(() => document.getElementById("btn-close-settings")?.focus());
 }
 
 function closeSettings() {
   el.settingsModal.classList.add("hidden");
   el.settingsModal.setAttribute("aria-hidden", "true");
+  if (state.lastFocusedElement instanceof HTMLElement) {
+    state.lastFocusedElement.focus();
+  }
+  state.lastFocusedElement = null;
 }
 
 async function loadOptions() {
@@ -524,6 +636,7 @@ function bindModelSelectors() {
       const ratio = el.settingsAspectRatio.value;
       const size = el.settingsImageSize ? el.settingsImageSize.value : "";
       updateModelDependentOptions(el.settingsModel, el.settingsAspectRatio, el.settingsImageSize, ratio, size, el.settingsQuality);
+      applyModelTimeoutHint(el.settingsModel.value, el.settingsPollTimeout);
     });
   }
   if (el.settingsModelCustom) {
@@ -550,6 +663,7 @@ async function loadSettings() {
   el.settingsConcurrency.value = s.concurrency || 10;
   el.settingsPollInterval.value = s.poll_interval_sec || 20;
   el.settingsPollTimeout.value = s.poll_timeout_sec || 300;
+  applyModelTimeoutHint(selectedSettingsModel(), el.settingsPollTimeout);
   el.settingsSourceDir.value = s.source_dir || "";
   el.settingsOutputDir.value = s.output_dir || "";
 
@@ -575,16 +689,19 @@ async function loadSettings() {
 }
 
 async function saveSettings() {
+  const model = selectedSettingsModel();
+  const modelTimeout = Number(getModelInfo(model).poll_timeout_sec || 0);
+  const pollTimeout = Math.max(Number(el.settingsPollTimeout.value || 300), modelTimeout);
   const body = {
     base_url: el.baseUrl.value.trim() || "https://noova.cn",
     image_proxy_url: el.imageProxyUrl ? el.imageProxyUrl.value.trim() : "",
-    model: selectedSettingsModel(),
+    model,
     aspect_ratio: el.settingsAspectRatio.value,
     quality: el.settingsQuality.value,
     image_size: el.settingsImageSize ? el.settingsImageSize.value : "",
     concurrency: Number(el.settingsConcurrency.value || 10),
     poll_interval_sec: Number(el.settingsPollInterval.value || 20),
-    poll_timeout_sec: Number(el.settingsPollTimeout.value || 300),
+    poll_timeout_sec: pollTimeout,
     source_dir: el.settingsSourceDir.value.trim(),
     output_dir: el.settingsOutputDir.value.trim(),
   };
@@ -665,6 +782,19 @@ async function scanFolder() {
   setActionMessage(`扫描完成，共 ${data.count || 0} 张图片`);
 }
 
+async function restoreLatestJob() {
+  const list = await api("/api/jobs");
+  const jobs = list.data || [];
+  if (!jobs.length) return;
+
+  state.currentJobId = jobs[0].id;
+  const res = await api(`/api/jobs/${state.currentJobId}`);
+  renderJob(res.data);
+  if (["queued", "running"].includes(res.data.status)) {
+    startPolling();
+  }
+}
+
 function collectPrompts() {
   return state.prompts
     .map((item) => ({
@@ -734,6 +864,7 @@ async function deleteJob() {
   const res = await api(`/api/jobs/${state.currentJobId}`, { method: "DELETE" });
   setActionMessage(res.message || "任务已删除");
   state.currentJobId = null;
+  state.lastTaskRenderSignature = "";
   stopPolling();
   el.jobSummary.textContent = "";
   el.statTotal.textContent = "0";
@@ -741,8 +872,10 @@ async function deleteJob() {
   el.statFailed.textContent = "0";
   if (el.statCancelled) el.statCancelled.textContent = "0";
   el.statPending.textContent = "0";
-  el.progressFill.style.width = "0%";
+  el.progressFill.style.transform = "scaleX(0)";
   el.progressText.textContent = "0%";
+  renderResultCards([]);
+  if (el.resultsCount) el.resultsCount.textContent = "0 项";
   el.taskTbody.innerHTML = '<tr><td colspan="5" class="empty">创建任务后显示每张图的处理状态</td></tr>';
 }
 
@@ -752,7 +885,7 @@ function startPolling() {
     refreshJob().catch((err) => {
       setActionMessage(err.message || String(err), true);
     });
-  }, 1000);
+  }, 2000);
   refreshJob().catch((err) => {
     setActionMessage(err.message || String(err), true);
   });
@@ -811,38 +944,53 @@ function renderJob(job) {
 
   const done = (job.success || 0) + (job.failed || 0) + (job.cancelled || 0);
   const percent = job.total ? Math.round((done / job.total) * 100) : 0;
-  el.progressFill.style.width = `${percent}%`;
+  el.progressFill.style.transform = `scaleX(${percent / 100})`;
   el.progressText.textContent = `${percent}%`;
 
   const tasks = job.tasks || [];
-  if (!tasks.length) {
-    el.taskTbody.innerHTML =
-      '<tr><td colspan="5" class="empty">暂无子任务</td></tr>';
-    return;
-  }
+  if (el.resultsCount) el.resultsCount.textContent = `${tasks.length} 项`;
+  const taskRenderSignature = [
+    job.id,
+    ...tasks.map((task) => [
+      task.id,
+      task.status,
+      task.message,
+      task.output_path,
+      task.result_url,
+    ].join("\u0001")),
+  ].join("\u0002");
 
-  el.taskTbody.innerHTML = tasks
-    .map((task) => {
-      const errMsg = (task.status === "failed" && task.message) ? `<div class="task-error">${escapeHtml(task.message)}</div>` : "";
-      const pathDisplay = task.output_path || task.result_url || "-";
-      const isCompleted = ["success", "failed", "cancelled"].includes(task.status);
-      const isActive = !isCompleted;
-      return `
-        <tr class="${isActive ? "task-active" : ""}">
-          <td>${escapeHtml(task.image_name || "")}</td>
-          <td><span title="${escapeHtml(task.prompt || "")}">${escapeHtml(task.prompt_name || "")}</span></td>
-          <td><span class="status ${escapeHtml(task.status)}">${escapeHtml(
-            statusLabel(task.status)
-          )}</span></td>
-          <td>
-            <span class="task-msg">${escapeHtml(task.message || "")}</span>
-            ${errMsg}
-          </td>
-          <td class="path-cell">${escapeHtml(pathDisplay)}</td>
-        </tr>
-      `;
-    })
-    .join("");
+  if (state.lastTaskRenderSignature !== taskRenderSignature) {
+    state.lastTaskRenderSignature = taskRenderSignature;
+    renderResultCards(tasks);
+    if (!tasks.length) {
+      el.taskTbody.innerHTML =
+        '<tr><td colspan="5" class="empty">暂无子任务</td></tr>';
+    } else {
+      el.taskTbody.innerHTML = tasks
+        .map((task) => {
+          const errMsg = (task.status === "failed" && task.message) ? `<div class="task-error">${escapeHtml(task.message)}</div>` : "";
+          const pathDisplay = task.output_path || task.result_url || "-";
+          const isCompleted = ["success", "failed", "cancelled"].includes(task.status);
+          const isActive = !isCompleted;
+          return `
+            <tr class="${isActive ? "task-active" : ""}">
+              <td><span class="task-image-name" title="${escapeHtml(task.image_name || "")}">${escapeHtml(task.image_name || "")}</span></td>
+              <td><span class="task-prompt" title="${escapeHtml(task.prompt || "")}">${escapeHtml(task.prompt_name || "")}</span></td>
+              <td><span class="status ${escapeHtml(task.status)}">${escapeHtml(
+                statusLabel(task.status)
+              )}</span></td>
+              <td>
+                <span class="task-msg">${escapeHtml(task.message || "")}</span>
+                ${errMsg}
+              </td>
+              <td class="path-cell">${escapeHtml(pathDisplay)}</td>
+            </tr>
+          `;
+        })
+        .join("");
+    }
+  }
 
   el.btnCancel.disabled = !["queued", "running"].includes(job.status);
   if (el.btnDelete) el.btnDelete.disabled = ["queued", "running"].includes(job.status);
@@ -888,6 +1036,7 @@ function bindEvents() {
       const path = await pickFolder("选择源图片文件夹", el.sourceDir.value);
       if (!path) return;
       el.sourceDir.value = path;
+      await scanFolder();
     } catch (err) {
       setActionMessage(err.message || String(err), true);
     }
@@ -977,6 +1126,29 @@ function bindEvents() {
   el.settingsModal.addEventListener("click", (e) => {
     if (e.target === el.settingsModal) closeSettings();
   });
+  document.addEventListener("keydown", (event) => {
+    if (el.settingsModal.classList.contains("hidden")) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeSettings();
+      return;
+    }
+    if (event.key !== "Tab") return;
+
+    const focusable = Array.from(el.settingsModal.querySelectorAll(
+      'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+    ));
+    if (!focusable.length) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  });
   window.addEventListener("beforeunload", () => {
     stopPolling();
   });
@@ -987,6 +1159,7 @@ async function init() {
   bindModelSelectors();
   state.prompts = defaultPrompts();
   renderPrompts();
+  renderResultCards([]);
   if (typeof window.refreshIcons === "function") {
     window.refreshIcons();
   }
@@ -996,6 +1169,11 @@ async function init() {
     await loadSettings();
   } catch (err) {
     setActionMessage(`加载设置失败: ${err.message || err}`, true);
+  }
+  try {
+    await restoreLatestJob();
+  } catch (err) {
+    setActionMessage(`恢复最近任务失败: ${err.message || err}`, true);
   }
   if (typeof window.refreshIcons === "function") {
     window.refreshIcons();

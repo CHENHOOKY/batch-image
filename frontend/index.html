@@ -4,6 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>批量出图</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="/styles.css" />
     <script src="/lucide.min.js"></script>
   </head>
@@ -186,6 +187,8 @@
             <div class="progress-bar"><div id="progress-fill" class="progress-fill"></div></div>
             <div id="progress-text" class="progress-text">0%</div>
           </div>
+          <div class="results-heading"><div><h3>输出结果</h3><p>每张图片的状态、提示词和输出位置</p></div><span id="results-count" class="results-count">0 项</span></div>
+          <div id="results-grid" class="results-grid" aria-live="polite"></div>
 
           <div class="table-wrap">
             <table>
@@ -209,14 +212,14 @@
       </main>
     </div>
 
-    <div id="settings-modal" class="modal hidden" aria-hidden="true">
-      <div class="modal-card">
+    <div id="settings-modal" class="modal hidden" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+      <form class="modal-card" id="settings-form" onsubmit="return false;">
         <div class="section-head">
           <div>
-            <h2>设置</h2>
+            <h2 id="settings-title">设置</h2>
             <p class="section-note">API 与默认参数</p>
           </div>
-          <button id="btn-close-settings" class="btn ghost icon-only" type="button" title="关闭">
+          <button id="btn-close-settings" class="btn ghost icon-only" type="button" title="关闭" aria-label="关闭设置">
             <i data-lucide="x"></i>
           </button>
         </div>
@@ -313,7 +316,7 @@
           </div>
           <span id="settings-message" class="status-text"></span>
         </div>
-      </div>
+      </form>
     </div>
 
     <script src="/app.js"></script>

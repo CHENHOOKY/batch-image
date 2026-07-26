@@ -10,10 +10,16 @@ from typing import Any
 
 import httpx
 
-from .config import get_model_endpoint
+from .config import (
+    get_model_endpoint,
+    get_model_image_param,
+    model_supports_quality,
+    validate_external_http_url,
+)
 
 MAX_IMAGE_DIM = 2048
 MAX_POLL_RETRIES = 120
+MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024
 
 
 class NoovaApiError(RuntimeError):
@@ -28,15 +34,24 @@ class NoovaClient:
         if not api_key or not api_key.strip():
             raise NoovaApiError("\u8bf7\u5148\u5728\u8bbe\u7f6e\u4e2d\u586b\u5199 API Key")
         self.api_key = api_key.strip()
-        self.base_url = base_url.rstrip("/")
+        try:
+            self.base_url = validate_external_http_url(base_url, field_name="API Base URL")
+        except ValueError as exc:
+            raise NoovaApiError(str(exc)) from exc
         self.timeout = timeout
-        self.image_proxy_url = image_proxy_url.strip() if image_proxy_url else ""
+        try:
+            self.image_proxy_url = (
+                validate_external_http_url(image_proxy_url, field_name="图床 API URL")
+                if image_proxy_url else ""
+            )
+        except ValueError as exc:
+            raise NoovaApiError(str(exc)) from exc
         self._client: httpx.AsyncClient | None = None
 
     async def __aenter__(self) -> "NoovaClient":
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(connect=60.0, read=self.timeout, write=self.timeout, pool=60.0),
-            follow_redirects=True,
+            follow_redirects=False,
             headers={
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             },
@@ -68,7 +83,7 @@ class NoovaClient:
         owns_client = self._client is None
         client = self._client or httpx.AsyncClient(
             timeout=httpx.Timeout(connect=60.0, read=self.timeout, write=self.timeout, pool=60.0),
-            follow_redirects=True,
+            follow_redirects=False,
             headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
         )
         try:
@@ -89,6 +104,19 @@ class NoovaClient:
         else:
             payload = response.text
 
+        if isinstance(payload, dict) and "code" in payload and str(payload.get("code")) != "0":
+            detail = payload.get("msg") or payload.get("message") or payload
+            raise NoovaApiError(
+                f"API 业务请求失败: {detail}",
+                status_code=response.status_code,
+                payload=payload,
+            )
+
+        if 300 <= response.status_code < 400:
+            raise NoovaApiError(
+                f"API 请求被重定向 ({response.status_code})，请直接填写最终 API 地址",
+                status_code=response.status_code,
+            )
         if response.status_code >= 400:
             detail = payload
             if isinstance(payload, dict):
@@ -156,7 +184,7 @@ class NoovaClient:
         owns_client = self._client is None
         client = self._client or httpx.AsyncClient(
             timeout=httpx.Timeout(connect=60.0, read=self.timeout, write=self.timeout, pool=60.0),
-            follow_redirects=True,
+            follow_redirects=False,
             headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
         )
         try:
@@ -168,6 +196,11 @@ class NoovaClient:
             if owns_client:
                 await client.aclose()
 
+        if 300 <= response.status_code < 400:
+            raise NoovaApiError(
+                f"图床上传被重定向 ({response.status_code})，请直接填写最终图床地址",
+                status_code=response.status_code,
+            )
         if response.status_code >= 400:
             raise NoovaApiError(
                 f"\u56fe\u5e8a\u4e0a\u4f20\u5931\u8d25 ({response.status_code}): {response.text[:300]}",
@@ -209,14 +242,10 @@ class NoovaClient:
     ) -> str:
         """Create a draw task.
         urls: list of image URLs (from upload_image_direct) OR data: URLs/base64.
-        All models go to /v1/draw/completions.
-        gpt-image-2 gets quality param, nano-banana does not.
-        The image field name is model-specific and resolved via
-        backend.config.get_model_image_param (all current models use `urls`)."""
-        # The image field name is model-specific; all current models use
-        # `urls`. See backend.config.get_model_image_param.
-        from .config import get_model_image_param
+        Endpoint, image field, and quality support are model-specific and
+        resolved from backend.config."""
         image_param = get_model_image_param(model)
+        endpoint = get_model_endpoint(model)
         body: dict[str, Any] = {
             "model": model,
             "prompt": prompt,
@@ -225,8 +254,7 @@ class NoovaClient:
         }
         if urls:
             body[image_param] = urls
-        # gpt-image-2 family supports quality
-        if model in ("gpt-image-2", "gpt-image-2-vip"):
+        if model_supports_quality(model):
             body["quality"] = quality or "auto"
 
         # Retry up to 5 times for timeout/connection errors
@@ -235,7 +263,7 @@ class NoovaClient:
             try:
                 payload = await self._request(
                     "POST",
-                    "/v1/draw/completions",
+                    endpoint,
                     json_body=body,
                     headers=self._headers(),
                 )
@@ -269,6 +297,7 @@ class NoovaClient:
         poll_interval: int,
         cancel_check=None,
         poll_timeout: float = 300.0,
+        poll_param: str = "id",
     ) -> dict[str, Any]:
         """Poll until task completes, fails, or poll_timeout elapses.
         cancel_check: optional async/await callable returning True to abort.
@@ -291,7 +320,7 @@ class NoovaClient:
                 try:
                     payload = await self._request(
                         "POST", poll_url,
-                        json_body={"id": task_id},
+                        json_body={poll_param: task_id},
                         headers=self._headers(),
                     )
                     break
@@ -315,7 +344,7 @@ class NoovaClient:
                 data = payload if isinstance(payload, dict) else {}
 
             status = str(data.get("status") or "")
-            if status in {"succeeded", "failed", "violation", "cancelled"}:
+            if status in {"completed", "succeeded", "failed", "violation", "cancelled"}:
                 return data
 
         raise NoovaApiError(f"\u8f6e\u8be2\u8d85\u65f6\uff08{int(poll_timeout)} \u79d2\uff09")
@@ -323,24 +352,51 @@ class NoovaClient:
     # ---- download ----
 
     async def download_file(self, url: str, dest: Path) -> Path:
+        try:
+            url = validate_external_http_url(str(url), field_name="下载地址")
+        except ValueError as exc:
+            raise NoovaApiError(str(exc)) from exc
         dest.parent.mkdir(parents=True, exist_ok=True)
         owns_client = self._client is None
         client = self._client or httpx.AsyncClient(
             timeout=httpx.Timeout(connect=60.0, read=self.timeout, write=self.timeout, pool=60.0),
-            follow_redirects=True,
+            follow_redirects=False,
             headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
         )
         try:
-            response = await client.get(url)
+            async with client.stream("GET", url) as response:
+                if 300 <= response.status_code < 400:
+                    raise NoovaApiError(
+                        f"下载地址被重定向 ({response.status_code})，已拒绝跟随",
+                        status_code=response.status_code,
+                    )
+                if response.status_code >= 400:
+                    detail = (await response.aread())[:300].decode("utf-8", "replace")
+                    raise NoovaApiError(
+                        f"下载图片失败 ({response.status_code}): {detail}",
+                        status_code=response.status_code,
+                    )
+                content_length = response.headers.get("content-length")
+                try:
+                    declared_size = int(content_length or 0)
+                except ValueError:
+                    declared_size = 0
+                if declared_size > MAX_DOWNLOAD_BYTES:
+                    raise NoovaApiError("下载图片超过 25 MB 限制")
+                total = 0
+                try:
+                    with dest.open("wb") as output:
+                        async for chunk in response.aiter_bytes(64 * 1024):
+                            total += len(chunk)
+                            if total > MAX_DOWNLOAD_BYTES:
+                                raise NoovaApiError("下载图片超过 25 MB 限制")
+                            output.write(chunk)
+                except Exception:
+                    dest.unlink(missing_ok=True)
+                    raise
         finally:
             if owns_client:
                 await client.aclose()
-        if response.status_code >= 400:
-            raise NoovaApiError(
-                f"\u4e0b\u8f7d\u56fe\u7247\u5931\u8d25 ({response.status_code}): {response.text[:300]}",
-                status_code=response.status_code,
-            )
-        dest.write_bytes(response.content)
         return dest
 
     # ---- helpers ----

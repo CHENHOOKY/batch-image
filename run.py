@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import socket
 import sys
 import webbrowser
@@ -52,6 +51,7 @@ def find_free_port(start: int = 8787, end: int = 8800) -> int:
 
 
 def main() -> None:
+    check_python_version()
     port = find_free_port()
     url = f"http://127.0.0.1:{port}"
     print(f"批量出图服务启动: {url}")

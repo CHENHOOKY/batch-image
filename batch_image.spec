@@ -8,6 +8,7 @@ frontend_files = [
     ("frontend/app.js", "frontend"),
     ("frontend/styles.css", "frontend"),
     ("frontend/lucide.min.js", "frontend"),
+    ("frontend/favicon.svg", "frontend"),
 ]
 
 hidden = [

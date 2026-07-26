@@ -1,8 +1,11 @@
 ﻿from __future__ import annotations
 
 import json
+import ipaddress
+import socket
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
@@ -26,6 +29,8 @@ GPT_IMAGE_RATIOS = [
     "1:2",
     "2:1",
 ]
+
+GPT_IMAGE_2_G_RATIOS = ["auto", *GPT_IMAGE_RATIOS]
 
 NANO_BANANA_RATIOS = [
     "auto",
@@ -57,6 +62,17 @@ MODELS: list[dict[str, Any]] = [
         "supports_quality": True,
     },
     {
+        "id": "gpt-image-2-G",
+        "name": "gpt-image-2-G",
+        "endpoint": "/api/v1/gateway/invoke",
+        "image_param": "urls",
+        "poll_param": "task_id",
+        "poll_timeout_sec": 960,
+        "aspect_ratios": GPT_IMAGE_2_G_RATIOS,
+        "image_sizes": IMAGE_SIZES_1K_ONLY,
+        "supports_quality": True,
+    },
+    {
         "id": "nano-banana-2",
         "name": "nano-banana-2",
         "endpoint": "/v1/draw/nano-banana",
@@ -74,27 +90,43 @@ MODELS: list[dict[str, Any]] = [
         "aspect_ratios": NANO_BANANA_RATIOS,
         "supports_quality": False,
     },
-    {
-        "id": "nano-banana-fast",
-        "name": "nano-banana-fast",
-        "endpoint": "/v1/draw/nano-banana",
-        "image_param": "urls",
-        "aspect_ratios": NANO_BANANA_RATIOS,
-        "image_sizes": IMAGE_SIZES_1K_ONLY,
-        "supports_quality": False,
-    },
-    {
-        "id": "nano-banana",
-        "name": "nano-banana",
-        "endpoint": "/v1/draw/nano-banana",
-        "image_param": "urls",
-        "aspect_ratios": NANO_BANANA_RATIOS,
-        "image_sizes": [],
-        "supports_quality": False,
-    },
 ]
 
 _MODELS_BY_ID: dict[str, dict[str, Any]] = {m["id"]: m for m in MODELS}
+
+
+def validate_external_http_url(value: str, *, field_name: str = "URL", resolve_host: bool = True) -> str:
+    """Return a normalized public http(s) URL, rejecting local/private targets."""
+    cleaned = str(value or "").strip().rstrip("/")
+    parsed = urlparse(cleaned)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or not parsed.hostname:
+        raise ValueError(f"{field_name} 必须是 http/https 地址")
+    if parsed.username or parsed.password:
+        raise ValueError(f"{field_name} 不能包含用户名或密码")
+
+    host = parsed.hostname.rstrip(".").lower()
+    if host in {"localhost", "localhost.localdomain"} or host.endswith(".localhost"):
+        raise ValueError(f"{field_name} 不能指向本机地址")
+
+    def reject_non_public(address_text: str) -> None:
+        try:
+            address = ipaddress.ip_address(address_text)
+        except ValueError:
+            return
+        if not address.is_global:
+            raise ValueError(f"{field_name} 不能指向内网、本机或保留地址")
+
+    reject_non_public(host)
+
+    if resolve_host:
+        try:
+            infos = socket.getaddrinfo(host, parsed.port, type=socket.SOCK_STREAM)
+        except socket.gaierror as exc:
+            raise ValueError(f"{field_name} 域名解析失败") from exc
+        for info in infos:
+            reject_non_public(info[4][0])
+
+    return cleaned
 
 
 def get_model_info(model_id: str) -> dict[str, Any]:
@@ -117,6 +149,16 @@ def get_model_endpoint(model_id: str) -> str:
 def get_model_image_param(model_id: str) -> str:
     """Return the JSON field name for image references (all current models: 'urls')."""
     return get_model_info(model_id)["image_param"]
+
+
+def get_model_poll_param(model_id: str) -> str:
+    """Return the task-id field expected by the model's result endpoint."""
+    return str(get_model_info(model_id).get("poll_param") or "id")
+
+
+def get_model_poll_timeout_sec(model_id: str) -> int | None:
+    value = get_model_info(model_id).get("poll_timeout_sec")
+    return int(value) if value else None
 
 
 def model_supports_quality(model_id: str) -> bool:
@@ -158,6 +200,8 @@ def load_settings() -> dict[str, Any]:
 
     merged = dict(DEFAULT_SETTINGS)
     merged.update({k: v for k, v in data.items() if k in DEFAULT_SETTINGS})
+    if merged.get("model") not in _MODELS_BY_ID:
+        merged["model"] = DEFAULT_SETTINGS["model"]
     return merged
 
 
