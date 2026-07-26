@@ -7,12 +7,13 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
-from fastapi.staticfiles import StaticFiles
+from starlette.responses import FileResponse, HTMLResponse, JSONResponse
 
 from .api_client import NoovaApiError, NoovaClient
 from .config import (
     BASE_DIR,
     MODELS,
+    assert_safe_directory,
     ensure_dirs,
     load_settings,
     public_settings,
@@ -21,11 +22,16 @@ from .config import (
 )
 from .job_manager import job_manager
 from .models import ApiResponse, BatchJobCreate, SettingsUpdate
+from .security import APP_TOKEN, HostGuardMiddleware, TokenAuthMiddleware
 
 ensure_dirs()
 
-app = FastAPI(title="批量出图", version="1.4.1")
+app = FastAPI(title="批量出图", version="1.6.0")
 frontend_dir = BASE_DIR / "frontend"
+
+# 中间件按添加顺序的逆序执行：先校验 Host（阻断 DNS rebinding），再校验令牌。
+app.add_middleware(TokenAuthMiddleware, token=APP_TOKEN)
+app.add_middleware(HostGuardMiddleware)
 
 # --- Non-blocking folder/file picker sessions ---
 
@@ -175,7 +181,7 @@ async def _run_file_picker(session_id: str, title: str, initial: str) -> None:
 
 @app.get("/api/health")
 async def health() -> dict[str, Any]:
-    return {"ok": True, "service": "batch-image", "version": "1.4.1"}
+    return {"ok": True, "service": "batch-image", "version": "1.6.0"}
 
 
 @app.get("/api/settings")
@@ -212,9 +218,12 @@ async def scan_folder(body: dict[str, Any]) -> ApiResponse:
     folder = str(body.get("path") or "").strip()
     if not folder:
         raise HTTPException(status_code=400, detail="请提供文件夹路径")
-    path = Path(folder).expanduser()
+    try:
+        path = assert_safe_directory(Path(folder), field_name="源图片文件夹")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not path.exists() or not path.is_dir():
-        raise HTTPException(status_code=400, detail=f"文件夹不存在: {path}")
+        raise HTTPException(status_code=400, detail="文件夹不存在或不可访问")
 
     exts = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
     files = sorted(
@@ -333,11 +342,22 @@ async def list_jobs() -> ApiResponse:
 
 
 @app.get("/api/jobs/{job_id}")
-async def get_job(job_id: str) -> ApiResponse:
+async def get_job(job_id: str, sig: str = "") -> JSONResponse:
+    """任务详情。
+
+    带上 ?sig=<上次拿到的指纹> 时，如果状态没变就只回一个极小的响应。
+    前端每 2 秒轮询一次，大批量任务的详情有好几 MB，绝大多数轮询之间
+    其实什么都没变，条件返回能把这部分开销直接省掉。
+    这里返回 JSONResponse 而不是 ApiResponse，是为了绕开 FastAPI 对
+    response_model 的全量再校验（几万条子任务时这一步很贵）。
+    """
     job = job_manager.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="任务不存在")
-    return ApiResponse(data=job.to_dict())
+    signature = job.state_signature()
+    if sig and sig == signature:
+        return JSONResponse({"ok": True, "message": "", "data": {"id": job.id, "unchanged": True, "sig": signature}})
+    return JSONResponse({"ok": True, "message": "", "data": {**job.to_dict(), "sig": signature}})
 
 
 @app.post("/api/jobs")
@@ -358,6 +378,16 @@ async def cancel_job(job_id: str) -> ApiResponse:
         return ApiResponse(message="已发送取消请求", data=job.to_dict())
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+@app.post("/api/jobs/{job_id}/retry")
+async def retry_job(job_id: str) -> ApiResponse:
+    """Re-run the failed / cancelled sub-tasks of a finished job."""
+    try:
+        job = await job_manager.retry_failed(job_id)
+        return ApiResponse(message="已开始重试失败任务", data=job.to_dict())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
 
 @app.get("/api/credit")
 async def get_credit() -> ApiResponse:
@@ -398,11 +428,15 @@ async def get_credit() -> ApiResponse:
     except ValueError as exc:
         raise HTTPException(status_code=502, detail=f"积分接口返回格式异常: {exc}") from exc
 
-    if resp.status_code != 200:
-        msg = data.get("message", f"积分接口返回 {resp.status_code}") if isinstance(data, dict) else f"积分接口返回 {resp.status_code}"
-        raise HTTPException(status_code=resp.status_code, detail=msg)
+    if not isinstance(data, dict):
+        # 上游返回数组/字符串等非对象结构时不要直接 .get，否则 500
+        raise HTTPException(status_code=502, detail="积分接口返回结构异常")
 
-    return ApiResponse(message=data.get("message", "获取积分成功"), data=data.get("data"))
+    if resp.status_code != 200:
+        msg = data.get("message") or f"积分接口返回 {resp.status_code}"
+        raise HTTPException(status_code=resp.status_code, detail=str(msg))
+
+    return ApiResponse(message=str(data.get("message") or "获取积分成功"), data=data.get("data"))
 
 
 @app.delete("/api/jobs/{job_id}")
@@ -416,142 +450,66 @@ async def delete_job(job_id: str) -> ApiResponse:
 
 
 
-# ---- Browser-native folder / file path resolution ----
-# When the user picks a folder via <input webkitdirectory>, the browser
-# only gives us a relative path.  We resolve it by asking the OS to locate
-# the file we just saw, then strip the file name to get the folder.
+# ---- 首页：把本次启动的访问令牌注入页面 ----
+#
+# 令牌只出现在由本服务渲染的 HTML 里。跨域网页受同源策略限制读不到响应体，
+# 因此无法拿到令牌，也就无法伪造任何 /api/ 请求。
 
-import subprocess as _subprocess
-import platform as _platform
-import os as _os
-
-_RESOLVE_MAX_DIRS_PER_ROOT = 800
+_TOKEN_PLACEHOLDER = "%%APP_TOKEN%%"
 
 
-def _same_file_metadata(path: Path, size: Any = None, last_modified: Any = None) -> bool:
-    try:
-        stat = path.stat()
-    except OSError:
-        return False
-    if size is not None:
-        try:
-            if stat.st_size != int(size):
-                return False
-        except (TypeError, ValueError):
-            return False
-    if last_modified is not None:
-        try:
-            browser_mtime = float(last_modified) / 1000.0
-            if abs(stat.st_mtime - browser_mtime) > 2.0:
-                return False
-        except (TypeError, ValueError):
-            pass
-    return True
+def _render_index() -> str:
+    html = (frontend_dir / "index.html").read_text(encoding="utf-8")
+    if _TOKEN_PLACEHOLDER not in html:
+        # 兼容没有占位符的旧页面：直接在 <head> 后插入
+        html = html.replace(
+            "<head>",
+            f'<head>\n    <script>window.__APP_TOKEN__ = "{APP_TOKEN}";</script>',
+            1,
+        )
+        return html
+    return html.replace(_TOKEN_PLACEHOLDER, APP_TOKEN)
 
 
-def _limited_walk(root: str):
-    scanned = 0
-    for dirpath, dirnames, filenames in _os.walk(root):
-        dirnames[:] = [
-            name for name in dirnames
-            if name not in {"node_modules", ".git", "__pycache__", "data", "outputs"}
-        ]
-        scanned += 1
-        if scanned > _RESOLVE_MAX_DIRS_PER_ROOT:
-            break
-        yield dirpath, filenames
-
-@app.post("/api/folder/resolve-prefix")
-async def resolve_folder_prefix(body: dict[str, Any]) -> ApiResponse:
-    """Given a filename and its relative_path from webkitdirectory,
-    find the absolute folder on disk by scanning the file system
-    inside likely roots (exe dir, desktop, home)."""
-    fname = str(body.get("filename") or "").strip()
-    rel = str(body.get("relative_path") or "").strip()
-    size = body.get("size")
-    last_modified = body.get("lastModified")
-    if not fname or not rel:
-        raise HTTPException(status_code=400, detail="filename / relative_path required")
-
-    dir_prefix = rel[: -len(fname)].lstrip("/").lstrip("\\")
-    import os as _os
-    _matched = None
-
-    # Walk from the exe directory and its parents (up to 3 levels up),
-    # then desktop, then home.  Stop as soon as we find the file.
-    roots = []
-    try:
-        cur = str(BASE_DIR)
-        for _ in range(5):
-            roots.append(cur)
-            parent = _os.path.dirname(cur)
-            if parent == cur:
-                break
-            cur = parent
-        roots.append(_os.path.join(_os.path.expanduser("~"), "Desktop"))
-        # Avoid recursively scanning the entire home directory.
-    except Exception:
-        roots = [str(BASE_DIR)]
-
-    for sysroot in roots:
-        try:
-            for dirpath, filenames in _limited_walk(sysroot):
-                if fname in filenames:
-                    candidate = Path(dirpath) / fname
-                    if not _same_file_metadata(candidate, size, last_modified):
-                        continue
-                    # If the relative prefix matches, prefer that
-                    norm = dirpath.replace("\\", "/")
-                    if dir_prefix and norm.endswith("/" + dir_prefix):
-                        _matched = norm[: -len(dir_prefix)].rstrip("/")
-                        break
-                    # Otherwise take any match
-                    if _matched is None:
-                        _matched = norm
-            if _matched:
-                break
-        except (PermissionError, OSError):
-            continue
-
-    if _matched:
-        return ApiResponse(data={"path": _matched, "root": sysroot})
-    # Fallback: just return the relative parent as a best-guess path
-    fallback = str(Path(BASE_DIR) / dir_prefix) if dir_prefix else str(BASE_DIR)
-    return ApiResponse(data={"path": fallback, "root": str(BASE_DIR)})
+@app.get("/")
+async def index() -> HTMLResponse:
+    if not (frontend_dir / "index.html").exists():
+        raise HTTPException(status_code=404, detail="前端文件缺失")
+    return HTMLResponse(
+        _render_index(),
+        headers={
+            "Cache-Control": "no-store",
+            # 令牌只靠同源策略保护，禁止被任意站点嵌套以防点击劫持
+            "X-Frame-Options": "DENY",
+            "Content-Security-Policy": "frame-ancestors 'none'",
+        },
+    )
 
 
-@app.post("/api/file/resolve-abs")
-async def resolve_file_abs(body: dict[str, Any]) -> ApiResponse:
-    """Given a file picked via <input type=file>, find its absolute path
-    in the workspace.  The browser only sends filename/size/type/lastModified,
-    so we best-effort locate the file."""
-    fname = str(body.get("filename") or "").strip()
-    size = body.get("size")
-    last_modified = body.get("lastModified")
-    if not fname:
-        raise HTTPException(status_code=400, detail="filename required")
-    import os as _os
-    roots = {str(BASE_DIR)}
-    try:
-        if _platform.system() == "Windows":
-            for sub in ("Desktop", "Documents", "Downloads", "Pictures"):
-                d = _os.path.join(_os.path.expanduser("~"), sub)
-                if _os.path.isdir(d):
-                    roots.add(d)
-    except Exception:
-        pass
-    for sysroot in roots:
-        try:
-            for dirpath, filenames in _limited_walk(sysroot):
-                if fname in filenames:
-                    candidate = Path(dirpath) / fname
-                    if _same_file_metadata(candidate, size, last_modified):
-                        return ApiResponse(data={"path": str(candidate)})
-        except Exception:
-            continue
-    return ApiResponse(data={"path": ""})
+@app.get("/index.html")
+async def index_html() -> HTMLResponse:
+    return await index()
 
-if frontend_dir.exists():
-    app.mount("/", StaticFiles(directory=str(frontend_dir), html=True), name="frontend")
+
+#: 静态资源白名单。不再用 StaticFiles 挂载整个目录：那样 //index.html、
+#: /index.html/ 之类的路径会绕过上面的渲染路由，把没替换令牌的原始页面发出去，
+#: 用户会看到一个所有请求都 401 的界面且刷新无效。
+_STATIC_FILES: dict[str, str] = {
+    "styles.css": "text/css; charset=utf-8",
+    "app.js": "application/javascript; charset=utf-8",
+    "lucide.min.js": "application/javascript; charset=utf-8",
+    "favicon.svg": "image/svg+xml",
+}
+
+
+@app.get("/{asset}")
+async def static_asset(asset: str) -> FileResponse:
+    media_type = _STATIC_FILES.get(asset)
+    if media_type is None:
+        raise HTTPException(status_code=404, detail="资源不存在")
+    target = frontend_dir / asset
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="资源不存在")
+    return FileResponse(target, media_type=media_type)
 
 

@@ -3,6 +3,9 @@
 
 block_cipher = None
 
+# 注意：datas 里绝不要加 data/ 目录，那里面是用户的 API Key。
+# 打包版运行时会把配置写到 %LOCALAPPDATA%\BatchImage\data（见 run.py），
+# 分发目录本身不应包含任何配置文件。
 frontend_files = [
     ("frontend/index.html", "frontend"),
     ("frontend/app.js", "frontend"),

@@ -1,4 +1,4 @@
-﻿const state = {
+const state = {
   options: {
     models: [
       { id: "gpt-image-2", name: "gpt-image-2", aspect_ratios: ["1:1","16:9","9:16","4:3","3:4","3:2","2:3","5:4","4:5","21:9","9:21","1:2","2:1"], image_sizes: [], supports_quality: true },
@@ -16,7 +16,22 @@
   lastTaskRenderSignature: "",
   lastFocusedElement: null,
   apiKeySet: false,
+  lastTasks: [],
+  resultFilter: "all",
+  lastJobSig: "",
 };
+
+const THEME_STORAGE_KEY = "batch-image-theme";
+
+const RESULT_FILTERS = [
+  { key: "all", label: "全部" },
+  { key: "active", label: "进行中" },
+  { key: "success", label: "成功" },
+  { key: "failed", label: "失败" },
+  { key: "cancelled", label: "取消" },
+];
+
+const ACTIVE_STATUSES = ["pending", "uploading", "submitting", "processing", "downloading"];
 
 const el = {
   sourceDir: document.getElementById("source-dir"),
@@ -39,10 +54,13 @@ const el = {
   progressText: document.getElementById("progress-text"),
   resultsGrid: document.getElementById("results-grid"),
   resultsCount: document.getElementById("results-count"),
+  filterChips: document.getElementById("filter-chips"),
   taskTbody: document.getElementById("task-tbody"),
   btnStart: document.getElementById("btn-start"),
   btnCancel: document.getElementById("btn-cancel"),
+  btnRetry: document.getElementById("btn-retry-failed"),
   btnDelete: document.getElementById("btn-delete-job"),
+  btnTheme: document.getElementById("btn-theme"),
   imageSize: document.getElementById("image-size"),
   settingsImageSize: document.getElementById("settings-image-size"),
   settingsModal: document.getElementById("settings-modal"),
@@ -63,7 +81,32 @@ const el = {
   creditBadge: document.getElementById("credit-badge"),
   creditValue: document.getElementById("credit-value"),
   btnRefreshCredit: document.getElementById("btn-refresh-credit"),
+  lightbox: document.getElementById("lightbox"),
+  lightboxImage: document.getElementById("lightbox-image"),
+  lightboxCaption: document.getElementById("lightbox-caption"),
+  btnCloseLightbox: document.getElementById("btn-close-lightbox"),
 };
+
+/* ---------- Theme ---------- */
+
+function currentTheme() {
+  return document.documentElement.getAttribute("data-theme") === "dark" ? "dark" : "light";
+}
+
+function applyTheme(theme) {
+  document.documentElement.setAttribute("data-theme", theme === "dark" ? "dark" : "light");
+  try {
+    localStorage.setItem(THEME_STORAGE_KEY, theme);
+  } catch (_) {
+    // storage unavailable; theme still applies for this session
+  }
+}
+
+function toggleTheme() {
+  applyTheme(currentTheme() === "dark" ? "light" : "dark");
+}
+
+/* ---------- Helpers ---------- */
 
 function statusLabel(status) {
   const map = {
@@ -84,11 +127,12 @@ function statusLabel(status) {
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
+    ...options,
     headers: {
       "Content-Type": "application/json",
+      "X-Auth-Token": window.__APP_TOKEN__ || "",
       ...(options.headers || {}),
     },
-    ...options,
   });
 
   let payload = null;
@@ -99,6 +143,9 @@ async function api(path, options = {}) {
   }
 
   if (!response.ok) {
+    if (response.status === 401) {
+      throw new Error("访问令牌已失效，请刷新页面（服务重启后令牌会更新）");
+    }
     const detail =
       (payload ? (payload.detail || payload.message) : null) ||
       `请求失败 (${response.status})`;
@@ -148,7 +195,7 @@ function updateModelDependentOptions(selectModelEl, selectRatioEl, selectSizeEl,
   if (sizes.length === 0) {
     const opt = document.createElement("option");
     opt.value = "";
-    opt.textContent = "\u4e0d\u9002\u7528";
+    opt.textContent = "不适用";
     selectSizeEl.appendChild(opt);
     selectSizeEl.disabled = true;
   } else {
@@ -478,16 +525,86 @@ function appendTextNode(parent, tag, className, text, title = "") {
   return node;
 }
 
+/* ---------- Lightbox ---------- */
+
+function openLightbox(src, caption) {
+  if (!el.lightbox || !el.lightboxImage) return;
+  state.lastFocusedElement = document.activeElement;
+  el.lightboxImage.src = src;
+  if (el.lightboxCaption) el.lightboxCaption.textContent = caption || "";
+  el.lightbox.classList.remove("hidden");
+  el.lightbox.setAttribute("aria-hidden", "false");
+  requestAnimationFrame(() => el.btnCloseLightbox?.focus());
+}
+
+function closeLightbox() {
+  if (!el.lightbox) return;
+  el.lightbox.classList.add("hidden");
+  el.lightbox.setAttribute("aria-hidden", "true");
+  if (el.lightboxImage) el.lightboxImage.src = "";
+  if (state.lastFocusedElement instanceof HTMLElement) {
+    state.lastFocusedElement.focus();
+  }
+  state.lastFocusedElement = null;
+}
+
+/* ---------- Result filter ---------- */
+
+function taskMatchesFilter(task, filterKey) {
+  if (filterKey === "all") return true;
+  if (filterKey === "active") return ACTIVE_STATUSES.includes(task.status);
+  return task.status === filterKey;
+}
+
+function filterCount(tasks, filterKey) {
+  return tasks.filter((task) => taskMatchesFilter(task, filterKey)).length;
+}
+
+function renderFilterChips(tasks) {
+  if (!el.filterChips) return;
+  el.filterChips.replaceChildren();
+  if (!tasks.length) return;
+
+  RESULT_FILTERS.forEach((filter) => {
+    const count = filterCount(tasks, filter.key);
+    if (filter.key !== "all" && count === 0 && state.resultFilter !== filter.key) return;
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = `chip${state.resultFilter === filter.key ? " active" : ""}`;
+    chip.setAttribute("aria-pressed", state.resultFilter === filter.key ? "true" : "false");
+
+    const label = document.createElement("span");
+    label.textContent = filter.label;
+    chip.appendChild(label);
+
+    const countNode = document.createElement("span");
+    countNode.className = "chip-count";
+    countNode.textContent = String(count);
+    chip.appendChild(countNode);
+
+    chip.addEventListener("click", () => {
+      state.resultFilter = filter.key;
+      renderTaskViews(state.lastTasks, true);
+    });
+    el.filterChips.appendChild(chip);
+  });
+}
+
+/* ---------- Result rendering ---------- */
+
 function renderResultCards(tasks) {
   if (!el.resultsGrid) return;
   el.resultsGrid.replaceChildren();
 
   if (!tasks.length) {
+    const isFiltered = state.resultFilter !== "all" && state.lastTasks.length > 0;
     appendTextNode(
       el.resultsGrid,
       "div",
       "results-empty",
-      "创建任务后，这里会按图片展示处理结果。"
+      isFiltered
+        ? "当前筛选条件下没有结果，点击“全部”查看所有任务。"
+        : "创建任务后，这里会按图片展示处理结果。"
     );
     return;
   }
@@ -525,7 +642,11 @@ function renderResultCards(tasks) {
       preview.alt = `${task.image_name || "生成结果"} 预览`;
       preview.loading = "lazy";
       preview.referrerPolicy = "no-referrer";
+      preview.title = "点击放大预览";
       preview.addEventListener("error", () => preview.remove());
+      preview.addEventListener("click", () => {
+        openLightbox(task.result_url, `${task.image_name || ""}${task.prompt ? " · " + task.prompt : ""}`);
+      });
       card.appendChild(preview);
     }
 
@@ -547,14 +668,63 @@ function renderResultCards(tasks) {
   });
 }
 
+function renderTaskTable(tasks) {
+  if (!tasks.length) {
+    const isFiltered = state.resultFilter !== "all" && state.lastTasks.length > 0;
+    el.taskTbody.innerHTML = `<tr><td colspan="5" class="empty">${
+      isFiltered ? "当前筛选条件下没有子任务" : "暂无子任务"
+    }</td></tr>`;
+    return;
+  }
+  el.taskTbody.innerHTML = tasks
+    .map((task) => {
+      const errMsg = (task.status === "failed" && task.message) ? `<div class="task-error">${escapeHtml(task.message)}</div>` : "";
+      const pathDisplay = task.output_path || task.result_url || "-";
+      const isCompleted = ["success", "failed", "cancelled"].includes(task.status);
+      const isActive = !isCompleted;
+      return `
+        <tr class="${isActive ? "task-active" : ""}">
+          <td><span class="task-image-name" title="${escapeHtml(task.image_name || "")}">${escapeHtml(task.image_name || "")}</span></td>
+          <td><span class="task-prompt" title="${escapeHtml(task.prompt || "")}">${escapeHtml(task.prompt_name || "")}</span></td>
+          <td><span class="status ${escapeHtml(task.status)}">${escapeHtml(
+            statusLabel(task.status)
+          )}</span></td>
+          <td>
+            <span class="task-msg">${escapeHtml(task.message || "")}</span>
+            ${errMsg}
+          </td>
+          <td class="path-cell">${escapeHtml(pathDisplay)}</td>
+        </tr>
+      `;
+    })
+    .join("");
+}
+
+function renderTaskViews(tasks, force = false) {
+  state.lastTasks = tasks;
+  const filtered = tasks.filter((task) => taskMatchesFilter(task, state.resultFilter));
+  if (el.resultsCount) {
+    el.resultsCount.textContent =
+      state.resultFilter === "all"
+        ? `${tasks.length} 项`
+        : `${filtered.length} / ${tasks.length} 项`;
+  }
+  renderFilterChips(tasks);
+  renderResultCards(filtered);
+  renderTaskTable(filtered);
+  if (force) {
+    state.lastTaskRenderSignature = "";
+  }
+}
+
 function setActionMessage(message, isError = false) {
   el.actionMessage.textContent = message || "";
-  el.actionMessage.style.color = isError ? "#b42318" : "";
+  el.actionMessage.classList.toggle("error", !!isError);
 }
 
 function setSettingsMessage(message, isError = false) {
   el.settingsMessage.textContent = message || "";
-  el.settingsMessage.style.color = isError ? "#b42318" : "";
+  el.settingsMessage.classList.toggle("error", !!isError);
 }
 
 function openSettings() {
@@ -576,7 +746,7 @@ function closeSettings() {
 async function loadOptions() {
   try {
     const res = await api("/api/options");
-    if (res.data && res.data.models) {
+    if (res.data && Array.isArray(res.data.models) && res.data.models.length) {
       state.options.models = res.data.models;
     }
   } catch (_) {
@@ -839,6 +1009,8 @@ async function startJob() {
     });
     const job = res.data;
     state.currentJobId = job.id;
+    state.resultFilter = "all";
+    state.lastJobSig = "";
     setActionMessage(`任务已创建：${job.id}`);
     renderJob(job);
     startPolling();
@@ -859,12 +1031,32 @@ async function cancelJob() {
   if (res.data) renderJob(res.data);
 }
 
+async function retryFailed() {
+  if (!state.currentJobId) return;
+  el.btnRetry.disabled = true;
+  try {
+    const res = await api(`/api/jobs/${state.currentJobId}/retry`, {
+      method: "POST",
+      body: "{}",
+    });
+    setActionMessage(res.message || "已开始重试失败任务");
+    if (res.data) renderJob(res.data);
+    startPolling();
+  } catch (err) {
+    setActionMessage(err.message || String(err), true);
+    el.btnRetry.disabled = false;
+  }
+}
+
 async function deleteJob() {
   if (!state.currentJobId) return;
   const res = await api(`/api/jobs/${state.currentJobId}`, { method: "DELETE" });
   setActionMessage(res.message || "任务已删除");
   state.currentJobId = null;
   state.lastTaskRenderSignature = "";
+  state.lastJobSig = "";
+  state.lastTasks = [];
+  state.resultFilter = "all";
   stopPolling();
   el.jobSummary.textContent = "";
   el.statTotal.textContent = "0";
@@ -874,9 +1066,9 @@ async function deleteJob() {
   el.statPending.textContent = "0";
   el.progressFill.style.transform = "scaleX(0)";
   el.progressText.textContent = "0%";
-  renderResultCards([]);
-  if (el.resultsCount) el.resultsCount.textContent = "0 项";
+  renderTaskViews([]);
   el.taskTbody.innerHTML = '<tr><td colspan="5" class="empty">创建任务后显示每张图的处理状态</td></tr>';
+  if (el.btnRetry) el.btnRetry.disabled = true;
 }
 
 function startPolling() {
@@ -910,7 +1102,29 @@ async function refreshJob() {
       state.currentJobId = jobs[0].id;
     }
 
-    const res = await api(`/api/jobs/${state.currentJobId}`);
+    let res;
+    try {
+      // 带上上次的状态指纹：没变化时后端只回一个极小的响应，
+      // 大批量任务下能省掉每 2 秒几 MB 的序列化与传输
+      const sig = encodeURIComponent(state.lastJobSig || "");
+      res = await api(`/api/jobs/${state.currentJobId}?sig=${sig}`);
+    } catch (err) {
+      // 历史记录有条数上限，旧任务可能已被清理
+      if (String(err.message || "").includes("任务不存在")) {
+        state.currentJobId = null;
+        state.lastJobSig = "";
+        stopPolling();
+        setActionMessage("该任务记录已被清理（仅保留最近若干条）");
+        return;
+      }
+      throw err;
+    }
+    if (res.data && res.data.unchanged) {
+      // 状态未变化，无需重绘；注意必须在这里返回，
+      // 否则下面会拿 undefined 的 status 去判断按钮可用性
+      state.lastJobSig = res.data.sig || state.lastJobSig;
+      return;
+    }
     renderJob(res.data);
 
     if (["completed", "failed", "cancelled"].includes(res.data.status)) {
@@ -928,6 +1142,7 @@ async function refreshJob() {
 function renderJob(job) {
   if (!job) return;
   state.currentJobId = job.id;
+  if (job.sig) state.lastJobSig = job.sig;
 
   const statusBreakdown = [
     job.success > 0 ? `成功${job.success}` : "",
@@ -948,52 +1163,30 @@ function renderJob(job) {
   el.progressText.textContent = `${percent}%`;
 
   const tasks = job.tasks || [];
-  if (el.resultsCount) el.resultsCount.textContent = `${tasks.length} 项`;
   const taskRenderSignature = [
     job.id,
+    state.resultFilter,
     ...tasks.map((task) => [
       task.id,
       task.status,
       task.message,
       task.output_path,
       task.result_url,
-    ].join("\u0001")),
-  ].join("\u0002");
+    ].join("")),
+  ].join("");
 
   if (state.lastTaskRenderSignature !== taskRenderSignature) {
     state.lastTaskRenderSignature = taskRenderSignature;
-    renderResultCards(tasks);
-    if (!tasks.length) {
-      el.taskTbody.innerHTML =
-        '<tr><td colspan="5" class="empty">暂无子任务</td></tr>';
-    } else {
-      el.taskTbody.innerHTML = tasks
-        .map((task) => {
-          const errMsg = (task.status === "failed" && task.message) ? `<div class="task-error">${escapeHtml(task.message)}</div>` : "";
-          const pathDisplay = task.output_path || task.result_url || "-";
-          const isCompleted = ["success", "failed", "cancelled"].includes(task.status);
-          const isActive = !isCompleted;
-          return `
-            <tr class="${isActive ? "task-active" : ""}">
-              <td><span class="task-image-name" title="${escapeHtml(task.image_name || "")}">${escapeHtml(task.image_name || "")}</span></td>
-              <td><span class="task-prompt" title="${escapeHtml(task.prompt || "")}">${escapeHtml(task.prompt_name || "")}</span></td>
-              <td><span class="status ${escapeHtml(task.status)}">${escapeHtml(
-                statusLabel(task.status)
-              )}</span></td>
-              <td>
-                <span class="task-msg">${escapeHtml(task.message || "")}</span>
-                ${errMsg}
-              </td>
-              <td class="path-cell">${escapeHtml(pathDisplay)}</td>
-            </tr>
-          `;
-        })
-        .join("");
-    }
+    renderTaskViews(tasks);
   }
 
-  el.btnCancel.disabled = !["queued", "running"].includes(job.status);
-  if (el.btnDelete) el.btnDelete.disabled = ["queued", "running"].includes(job.status);
+  const isRunning = ["queued", "running"].includes(job.status);
+  el.btnCancel.disabled = !isRunning;
+  if (el.btnDelete) el.btnDelete.disabled = isRunning;
+  if (el.btnRetry) {
+    const retryable = (job.failed || 0) + (job.cancelled || 0);
+    el.btnRetry.disabled = isRunning || retryable === 0;
+  }
 }
 
 async function fetchCredit() {
@@ -1015,6 +1208,7 @@ async function fetchCredit() {
 }
 
 function bindEvents() {
+  if (el.btnTheme) el.btnTheme.addEventListener("click", toggleTheme);
   document.getElementById("btn-open-settings").addEventListener("click", openSettings);
   document.getElementById("btn-close-settings").addEventListener("click", closeSettings);
   document.getElementById("btn-save-settings").addEventListener("click", async () => {
@@ -1107,6 +1301,15 @@ function bindEvents() {
       setActionMessage(err.message || String(err), true);
     }
   });
+  if (el.btnRetry) {
+    el.btnRetry.addEventListener("click", async () => {
+      try {
+        await retryFailed();
+      } catch (err) {
+        setActionMessage(err.message || String(err), true);
+      }
+    });
+  }
   document.getElementById("btn-delete-job").addEventListener("click", async () => {
     try {
       await deleteJob();
@@ -1126,7 +1329,24 @@ function bindEvents() {
   el.settingsModal.addEventListener("click", (e) => {
     if (e.target === el.settingsModal) closeSettings();
   });
+
+  if (el.lightbox) {
+    el.lightbox.addEventListener("click", (e) => {
+      if (e.target === el.lightbox) closeLightbox();
+    });
+  }
+  if (el.btnCloseLightbox) {
+    el.btnCloseLightbox.addEventListener("click", closeLightbox);
+  }
+
   document.addEventListener("keydown", (event) => {
+    if (el.lightbox && !el.lightbox.classList.contains("hidden")) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeLightbox();
+      }
+      return;
+    }
     if (el.settingsModal.classList.contains("hidden")) return;
     if (event.key === "Escape") {
       event.preventDefault();
@@ -1159,7 +1379,7 @@ async function init() {
   bindModelSelectors();
   state.prompts = defaultPrompts();
   renderPrompts();
-  renderResultCards([]);
+  renderTaskViews([]);
   if (typeof window.refreshIcons === "function") {
     window.refreshIcons();
   }
@@ -1181,5 +1401,3 @@ async function init() {
 }
 
 init();
-
-

@@ -2,7 +2,9 @@
 
 import json
 import ipaddress
+import os
 import socket
+import sys
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -11,6 +13,98 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
 CONFIG_PATH = DATA_DIR / "settings.json"
 JOBS_PATH = DATA_DIR / "jobs.json"
+
+
+# --- 敏感目录保护 ---------------------------------------------------------
+#
+# 鉴权中间件已经保证只有本工具的页面能调用接口，用户挑哪个文件夹是他自己的
+# 自由。这里只再加一层"手滑/被诱导"防护：拒绝把系统目录、开机自启目录当成
+# 源目录或输出目录，避免程序往这些地方建目录、写文件。
+
+
+def _system_dirs() -> list[Path]:
+    dirs: list[str] = []
+    if sys.platform.startswith("win"):
+        system_root = os.environ.get("SystemRoot") or r"C:\Windows"
+        dirs += [
+            system_root,
+            os.environ.get("ProgramFiles") or r"C:\Program Files",
+            os.environ.get("ProgramFiles(x86)") or r"C:\Program Files (x86)",
+        ]
+        # 开机自启目录：往这里写东西风险最高
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            dirs.append(os.path.join(appdata, r"Microsoft\Windows\Start Menu"))
+        programdata = os.environ.get("ProgramData")
+        if programdata:
+            dirs.append(os.path.join(programdata, r"Microsoft\Windows\Start Menu"))
+    else:
+        dirs += ["/etc", "/bin", "/sbin", "/usr", "/boot", "/sys", "/proc", "/dev", "/lib"]
+
+    resolved: list[Path] = []
+    for item in dirs:
+        if not item:
+            continue
+        try:
+            resolved.append(Path(item).resolve())
+        except OSError:
+            continue
+    return resolved
+
+
+def assert_safe_directory(path: Path, *, field_name: str = "目录") -> Path:
+    """校验一个用户提供的目录路径，返回解析后的绝对路径。
+
+    拒绝系统目录和开机自启目录，以及本程序自己的 data 目录。
+    """
+    try:
+        resolved = Path(path).expanduser().resolve()
+    except (OSError, RuntimeError) as exc:
+        raise ValueError(f"{field_name}路径无效: {path}") from exc
+
+    try:
+        data_dir = Path(DATA_DIR).resolve()
+    except OSError:
+        data_dir = None
+
+    # 盘符根 / 文件系统根：一次误选就会把子目录撒满整个盘，直接拒绝
+    if resolved.parent == resolved:
+        raise ValueError(f"{field_name}不能是磁盘根目录: {resolved}")
+
+    candidates = _system_dirs()
+    if data_dir is not None:
+        candidates.append(data_dir)
+
+    for blocked in candidates:
+        if resolved == blocked or _is_within(resolved, blocked):
+            raise ValueError(f"{field_name}不能指向系统目录或程序数据目录: {resolved}")
+    return resolved
+
+
+def assert_safe_file(path: Path, *, field_name: str = "文件") -> Path:
+    """校验用户提供的单个文件路径（固定参考图）。
+
+    和目录一样要挡住系统目录，否则 extra_image 会变成绕过目录校验的后门：
+    既是任意路径存在性探测器，也可能把系统文件当图片上传出去。
+    """
+    try:
+        resolved = Path(path).expanduser().resolve()
+    except (OSError, RuntimeError) as exc:
+        raise ValueError(f"{field_name}路径无效: {path}") from exc
+    assert_safe_directory(resolved.parent, field_name=f"{field_name}所在目录")
+    if not resolved.is_file():
+        raise ValueError(f"{field_name}不存在或不是文件")
+    if resolved.suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp", ".bmp"}:
+        raise ValueError(f"{field_name}必须是 jpg/jpeg/png/webp/bmp 图片")
+    return resolved
+
+
+def _is_within(child: Path, parent: Path) -> bool:
+    try:
+        child.relative_to(parent)
+        return True
+    except ValueError:
+        return False
 
 # --- Model capability definitions ---
 

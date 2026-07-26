@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
@@ -6,6 +6,24 @@
     <title>批量出图</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="/styles.css" />
+    <script>
+      // 由后端在渲染首页时替换。跨域页面读不到本页内容，因此拿不到该令牌。
+      window.__APP_TOKEN__ = "%%APP_TOKEN%%";
+    </script>
+    <script>
+      // Apply theme before first paint to avoid flashing
+      (function () {
+        try {
+          var saved = localStorage.getItem("batch-image-theme");
+          var theme = saved === "dark" || saved === "light"
+            ? saved
+            : (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+          document.documentElement.setAttribute("data-theme", theme);
+        } catch (_) {
+          document.documentElement.setAttribute("data-theme", "light");
+        }
+      })();
+    </script>
     <script src="/lucide.min.js"></script>
   </head>
   <body>
@@ -31,6 +49,10 @@
           </button>
         </div>
         <div class="top-actions">
+          <button id="btn-theme" class="btn ghost icon-only" type="button" title="切换深浅主题" aria-label="切换深浅主题">
+            <i data-lucide="moon" class="icon-moon"></i>
+            <i data-lucide="sun" class="icon-sun"></i>
+          </button>
           <button id="btn-refresh-job" class="btn ghost icon-btn" type="button" title="刷新进度">
             <i data-lucide="refresh-cw"></i>
             <span>刷新</span>
@@ -143,6 +165,10 @@
                 <i data-lucide="square"></i>
                 <span>取消任务</span>
               </button>
+              <button id="btn-retry-failed" class="btn warn icon-btn" type="button" disabled title="重新执行失败/取消的子任务">
+                <i data-lucide="rotate-ccw"></i>
+                <span>重试失败</span>
+              </button>
               <button id="btn-delete-job" class="btn ghost icon-btn" type="button" disabled>
                 <i data-lucide="trash-2"></i>
                 <span>删除记录</span>
@@ -188,6 +214,7 @@
             <div id="progress-text" class="progress-text">0%</div>
           </div>
           <div class="results-heading"><div><h3>输出结果</h3><p>每张图片的状态、提示词和输出位置</p></div><span id="results-count" class="results-count">0 项</span></div>
+          <div id="filter-chips" class="filter-chips" role="group" aria-label="按状态筛选结果"></div>
           <div id="results-grid" class="results-grid" aria-live="polite"></div>
 
           <div class="table-wrap">
@@ -319,6 +346,14 @@
       </form>
     </div>
 
+    <div id="lightbox" class="lightbox hidden" role="dialog" aria-modal="true" aria-label="图片预览">
+      <button id="btn-close-lightbox" class="btn icon-only lightbox-close" type="button" title="关闭预览" aria-label="关闭预览">
+        <i data-lucide="x"></i>
+      </button>
+      <img id="lightbox-image" src="" alt="生成结果预览" />
+      <div id="lightbox-caption" class="lightbox-caption"></div>
+    </div>
+
     <script src="/app.js"></script>
     <script>
       window.refreshIcons = function refreshIcons() {
@@ -330,5 +365,3 @@
     </script>
   </body>
 </html>
-
-

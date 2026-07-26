@@ -2,8 +2,8 @@
 
 import base64
 import io
+import ipaddress
 import mimetypes
-import time as time_module
 import uuid
 from pathlib import Path
 from typing import Any
@@ -18,8 +18,50 @@ from .config import (
 )
 
 MAX_IMAGE_DIM = 2048
-MAX_POLL_RETRIES = 120
 MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024
+#: 写入任务记录 / 展示给用户的错误文本上限，避免把超长上游响应灌进 jobs.json
+MAX_ERROR_TEXT = 300
+
+
+def clip(text: Any, limit: int = MAX_ERROR_TEXT) -> str:
+    """截断错误文本，防止 jobs.json 被超长上游响应撑爆。"""
+    value = str(text)
+    return value if len(value) <= limit else value[:limit] + "…"
+
+
+async def _validate_url_async(value: str, *, field_name: str) -> str:
+    """在线程里做 URL 校验：内部的 DNS 解析是阻塞调用，不能占住事件循环。"""
+    import asyncio
+
+    return await asyncio.to_thread(
+        validate_external_http_url, value, field_name=field_name
+    )
+
+
+def _assert_peer_public(response: "httpx.Response", field_name: str = "远端地址") -> None:
+    """核对这条连接实际连到的 IP 是否是公网地址。
+
+    URL 校验和真正建立连接之间隔着第二次 DNS 解析，恶意 DNS 可以在两次之间
+    把结果换成内网地址（TOCTOU）。这里读取连接的对端地址做事后核对：对下载
+    来说发生在读取响应体之前，属于有效拦截。
+    """
+    stream = response.extensions.get("network_stream")
+    if stream is None:
+        return  # 拿不到底层连接信息就不阻断，避免误伤
+    try:
+        peer = stream.get_extra_info("server_addr")
+    except Exception:
+        return
+    if not peer:
+        return
+    try:
+        address = ipaddress.ip_address(str(peer[0]))
+    except (ValueError, IndexError, TypeError):
+        return
+    if not address.is_global:
+        raise NoovaApiError(
+            f"{field_name}实际连接到了非公网地址 {address}，已中断（疑似 DNS 重绑定）"
+        )
 
 
 class NoovaApiError(RuntimeError):
@@ -79,7 +121,9 @@ class NoovaClient:
         headers: dict[str, str] | None = None,
         content: bytes | None = None,
     ) -> Any:
-        url = f"{self.base_url}{path}"
+        # 每次出站前重新校验一次：设置可能是很久以前保存的，域名解析结果可能已变化
+        base = await _validate_url_async(self.base_url, field_name="API Base URL")
+        url = f"{base}{path}"
         owns_client = self._client is None
         client = self._client or httpx.AsyncClient(
             timeout=httpx.Timeout(connect=60.0, read=self.timeout, write=self.timeout, pool=60.0),
@@ -91,6 +135,7 @@ class NoovaClient:
                 method, url, params=params, json=json_body,
                 headers=headers, content=content,
             )
+            _assert_peer_public(response, "API Base URL")
         finally:
             if owns_client:
                 await client.aclose()
@@ -107,7 +152,7 @@ class NoovaClient:
         if isinstance(payload, dict) and "code" in payload and str(payload.get("code")) != "0":
             detail = payload.get("msg") or payload.get("message") or payload
             raise NoovaApiError(
-                f"API 业务请求失败: {detail}",
+                f"API 业务请求失败: {clip(detail)}",
                 status_code=response.status_code,
                 payload=payload,
             )
@@ -122,7 +167,7 @@ class NoovaClient:
             if isinstance(payload, dict):
                 detail = payload.get("message") or payload.get("error") or payload
             raise NoovaApiError(
-                f"API \u8bf7\u6c42\u5931\u8d25 ({response.status_code}): {detail}",
+                f"API \u8bf7\u6c42\u5931\u8d25 ({response.status_code}): {clip(detail)}",
                 status_code=response.status_code,
                 payload=payload,
             )
@@ -187,11 +232,13 @@ class NoovaClient:
             follow_redirects=False,
             headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
         )
+        proxy_url = await _validate_url_async(self.image_proxy_url, field_name="图床 API URL")
         try:
             response = await client.post(
-                self.image_proxy_url,
+                proxy_url,
                 files={"file": (filename, data, content_type)},
             )
+            _assert_peer_public(response, "图床 API URL")
         finally:
             if owns_client:
                 await client.aclose()
@@ -203,16 +250,16 @@ class NoovaClient:
             )
         if response.status_code >= 400:
             raise NoovaApiError(
-                f"\u56fe\u5e8a\u4e0a\u4f20\u5931\u8d25 ({response.status_code}): {response.text[:300]}",
+                f"\u56fe\u5e8a\u4e0a\u4f20\u5931\u8d25 ({response.status_code}): {clip(response.text)}",
                 status_code=response.status_code,
             )
         try:
             payload = response.json()
         except ValueError:
-            raise NoovaApiError(f"\u56fe\u5e8a\u8fd4\u56de\u975e JSON: {response.text[:300]}")
+            raise NoovaApiError(f"\u56fe\u5e8a\u8fd4\u56de\u975e JSON: {clip(response.text)}")
         url = payload.get("url") if isinstance(payload, dict) else None
         if not url:
-            raise NoovaApiError(f"\u56fe\u5e8a\u672a\u8fd4\u56de url: {payload}")
+            raise NoovaApiError(f"\u56fe\u5e8a\u672a\u8fd4\u56de url: {clip(payload)}")
         return str(url)
 
     async def verify_connection(self) -> None:
@@ -275,7 +322,7 @@ class NoovaClient:
                     await asyncio.sleep(5 * (attempt + 1))
                 continue
         else:
-            raise NoovaApiError(f"\u521b\u5efa\u4efb\u52a1\u5931\u8d25\uff08\u5df2\u91cd\u8bd95 5 \u6b21\uff09: {last_exc}")
+            raise NoovaApiError(f"\u521b\u5efa\u4efb\u52a1\u5931\u8d25\uff08\u5df2\u91cd\u8bd95 5 \u6b21\uff09: {clip(last_exc)}")
 
         data = self._unwrap(payload)
         task_id: str | None = None
@@ -286,7 +333,7 @@ class NoovaClient:
             if isinstance(payload, dict):
                 task_id = payload.get("id")
         if not task_id:
-            raise NoovaApiError(f"\u672a\u8fd4\u56de\u4efb\u52a1 ID: {payload}")
+            raise NoovaApiError(f"\u672a\u8fd4\u56de\u4efb\u52a1 ID: {clip(payload)}")
         return str(task_id)
 
     # ---- poll result ----
@@ -305,6 +352,7 @@ class NoovaClient:
         import asyncio
         poll_url = f"/v1/draw/result"
         deadline = asyncio.get_event_loop().time() + max(1.0, poll_timeout)
+        first_round = True
         while asyncio.get_event_loop().time() < deadline:
             if cancel_check:
                 try:
@@ -313,7 +361,11 @@ class NoovaClient:
                 except TypeError:
                     if cancel_check():
                         raise NoovaApiError("\u4efb\u52a1\u5df2\u53d6\u6d88")
-            await asyncio.sleep(poll_interval)
+            # \u9996\u8f6e\u7acb\u5373\u67e5\u8be2\uff1a\u539f\u6765\u5148 sleep \u518d\u67e5\uff0c\u767d\u767d\u591a\u7b49\u4e00\u4e2a\u8f6e\u8be2\u5468\u671f\uff08\u9ed8\u8ba4 20 \u79d2\uff09
+            if first_round:
+                first_round = False
+            else:
+                await asyncio.sleep(poll_interval)
 
             last_exc = None
             for retry in range(3):
@@ -337,7 +389,7 @@ class NoovaClient:
                             continue
                     raise
             else:
-                raise NoovaApiError(f"\u8f6e\u8be2\u8bf7\u6c42\u8fde\u7eed\u5931\u8d25: {last_exc}")
+                raise NoovaApiError(f"\u8f6e\u8be2\u8bf7\u6c42\u8fde\u7eed\u5931\u8d25: {clip(last_exc)}")
 
             data = self._unwrap(payload)
             if not isinstance(data, dict):
@@ -353,7 +405,7 @@ class NoovaClient:
 
     async def download_file(self, url: str, dest: Path) -> Path:
         try:
-            url = validate_external_http_url(str(url), field_name="下载地址")
+            url = await _validate_url_async(str(url), field_name="下载地址")
         except ValueError as exc:
             raise NoovaApiError(str(exc)) from exc
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -365,15 +417,17 @@ class NoovaClient:
         )
         try:
             async with client.stream("GET", url) as response:
+                # 在读取任何响应体之前核对对端 IP，拦截 DNS 重绑定
+                _assert_peer_public(response, "下载地址")
                 if 300 <= response.status_code < 400:
                     raise NoovaApiError(
                         f"下载地址被重定向 ({response.status_code})，已拒绝跟随",
                         status_code=response.status_code,
                     )
                 if response.status_code >= 400:
-                    detail = (await response.aread())[:300].decode("utf-8", "replace")
+                    detail = clip((await response.aread())[:600].decode("utf-8", "replace"))
                     raise NoovaApiError(
-                        f"下载图片失败 ({response.status_code}): {detail}",
+                        f"下载图片失败 ({response.status_code}): {clip(detail)}",
                         status_code=response.status_code,
                     )
                 content_length = response.headers.get("content-length")

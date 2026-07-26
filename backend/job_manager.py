@@ -10,9 +10,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from .api_client import NoovaApiError, NoovaClient
+from .api_client import NoovaApiError, NoovaClient, clip
 from .config import (
     JOBS_PATH,
+    assert_safe_directory,
+    assert_safe_file,
     ensure_dirs,
     get_model_poll_param,
     get_model_poll_timeout_sec,
@@ -151,7 +153,8 @@ class BatchJob:
             "pending": pending,
         }
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_summary(self) -> dict[str, Any]:
+        """不含子任务的概要。列表接口用它，避免把几万条子任务全量吐给前端。"""
         c = self.counts()
         return {
             "id": self.id,
@@ -166,14 +169,43 @@ class BatchJob:
             "quality": self.quality,
             "image_size": self.image_size,
             "concurrency": self.concurrency,
+            # 必须保留：to_dict 基于 to_summary，漏掉它会导致重启后
+            # from_dict 拿不到轮询间隔而回落到 3 秒，重试时把上游请求量放大数倍
+            "poll_interval_sec": self.poll_interval_sec,
             "total": c["total"],
             "success": c["success"],
             "failed": c["failed"],
             "cancelled": c["cancelled"],
             "pending": c["pending"],
             "message": self.message,
-            "tasks": [t.to_dict() for t in self.tasks],
         }
+
+    def to_dict(self) -> dict[str, Any]:
+        return {**self.to_summary(), "tasks": [t.to_dict() for t in self.tasks]}
+
+    def state_signature(self) -> str:
+        """任务当前状态的廉价指纹。
+
+        前端每 2 秒轮询一次详情，而绝大多数轮询之间状态没有任何变化。
+        用它做条件返回：指纹没变就只回一个极小的响应，省掉几 MB 的
+        序列化和传输（大批量任务时这是主要开销）。
+        """
+        digest = hashlib.blake2b(digest_size=16)
+        digest.update(f"{self.status}\x1f{self.message}".encode("utf-8"))
+        for task in self.tasks:
+            digest.update(
+                "\x1f".join(
+                    (
+                        task.id,
+                        task.status,
+                        task.message,
+                        task.output_path or "",
+                        task.result_url or "",
+                    )
+                ).encode("utf-8")
+            )
+            digest.update(b"\x1e")
+        return digest.hexdigest()
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "BatchJob":
@@ -201,6 +233,8 @@ class BatchJob:
 
 class JobManager:
     _SAVE_INTERVAL = 2.0
+    #: 只保留最近这么多条历史任务，防止 jobs.json 无限增长
+    MAX_PERSISTED_JOBS = 30
 
     def __init__(self) -> None:
         self._jobs: dict[str, BatchJob] = {}
@@ -208,6 +242,7 @@ class JobManager:
         self._persist_lock = asyncio.Lock()
         self._active_job_id: str | None = None
         self._last_save_time: float = 0.0
+        self._persist_error: str = ""
         self._load_jobs()
 
     def _load_jobs(self) -> None:
@@ -244,24 +279,54 @@ class JobManager:
                         task.message = "服务重启，任务中断"
             self._jobs[job.id] = job
 
+    def _prune_jobs(self) -> None:
+        """只保留最近 MAX_PERSISTED_JOBS 条，且绝不淘汰正在跑的任务。"""
+        if len(self._jobs) <= self.MAX_PERSISTED_JOBS:
+            return
+        ordered = sorted(self._jobs.values(), key=lambda j: j.created_at, reverse=True)
+        keep: list[str] = []
+        for job in ordered:
+            if job.status in {"queued", "running"} or len(keep) < self.MAX_PERSISTED_JOBS:
+                keep.append(job.id)
+        keep_set = set(keep)
+        for job_id in [j for j in self._jobs if j not in keep_set]:
+            self._jobs.pop(job_id, None)
+
+    @staticmethod
+    def _write_jobs_file(text: str) -> None:
+        """同步写盘，由 to_thread 调用，不阻塞事件循环。"""
+        tmp = JOBS_PATH.with_suffix(".tmp")
+        tmp.write_text(text, encoding="utf-8")
+        tmp.replace(JOBS_PATH)
+
     async def _save_jobs(self, force: bool = False) -> None:
         now = time.monotonic()
         if not force and now - self._last_save_time < self._SAVE_INTERVAL:
             return
         self._last_save_time = now
         ensure_dirs()
+        self._prune_jobs()
         payload = {
             "updated_at": now_str(),
             "jobs": [job.to_dict() | {"cancel_flag": job.cancel_flag} for job in self._jobs.values()],
         }
         async with self._persist_lock:
-            tmp = JOBS_PATH.with_suffix(".tmp")
-            tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-            tmp.replace(JOBS_PATH)
+            # 写盘放到线程里（真正的阻塞 IO）。json.dumps 持有 GIL，放线程里
+            # 并不能真正让出事件循环，控制体积的是上面的历史条数上限和紧凑格式。
+            # 写盘失败不能让异常冒泡：它会穿过 worker -> gather，导致任务被误判
+            # 为已结束，而其余 worker 仍在后台继续消耗额度。
+            try:
+                text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+                await asyncio.to_thread(self._write_jobs_file, text)
+                self._persist_error = ""
+            except (OSError, TypeError, ValueError) as exc:
+                self._persist_error = clip(exc)
+                print(f"[批量出图] 任务记录写盘失败（不影响本次运行）: {self._persist_error}")
 
     def list_jobs(self) -> list[dict[str, Any]]:
+        """只返回概要。前端拿列表只为了知道最近任务的 id，不需要子任务明细。"""
         jobs = sorted(self._jobs.values(), key=lambda j: j.created_at, reverse=True)
-        return [j.to_dict() for j in jobs]
+        return [j.to_summary() for j in jobs]
 
     def get_job(self, job_id: str) -> BatchJob | None:
         return self._jobs.get(job_id)
@@ -337,15 +402,17 @@ class JobManager:
             if not source_raw:
                 raise ValueError(f"提示词「{prompt_name}」未指定源图片文件夹，且全局源文件夹也为空")
 
-            source_dir = Path(source_raw).expanduser()
+            source_dir = assert_safe_directory(Path(source_raw), field_name="源图片文件夹")
             images = list_images(source_dir)
 
             if output_raw:
-                output_dir = Path(output_raw).expanduser()
+                output_dir = assert_safe_directory(Path(output_raw), field_name="输出文件夹")
             else:
                 if not global_output:
                     raise ValueError(f"提示词「{prompt_name}」未指定输出文件夹，且全局输出文件夹也为空")
-                output_dir = Path(global_output).expanduser() / prompt_name
+                output_dir = assert_safe_directory(
+                    Path(global_output), field_name="输出文件夹"
+                ) / prompt_name
 
             output_dir.mkdir(parents=True, exist_ok=True)
             used_sources.append(str(source_dir.resolve()))
@@ -354,15 +421,13 @@ class JobManager:
             extra_image_1 = ""
             extra_image_2 = ""
             if extra_1_raw:
-                p1 = Path(extra_1_raw).expanduser()
-                if not p1.exists() or not p1.is_file():
-                    raise ValueError(f"提示词「{prompt_name}」的图一不存在: {p1}")
-                extra_image_1 = str(p1.resolve())
+                extra_image_1 = str(
+                    assert_safe_file(Path(extra_1_raw), field_name=f"提示词「{prompt_name}」的图一")
+                )
             if extra_2_raw:
-                p2 = Path(extra_2_raw).expanduser()
-                if not p2.exists() or not p2.is_file():
-                    raise ValueError(f"提示词「{prompt_name}」的图二不存在: {p2}")
-                extra_image_2 = str(p2.resolve())
+                extra_image_2 = str(
+                    assert_safe_file(Path(extra_2_raw), field_name=f"提示词「{prompt_name}」的图二")
+                )
 
             skip_paths = {p for p in (extra_image_1, extra_image_2) if p}
             for image in images:
@@ -416,6 +481,40 @@ class JobManager:
         if job.status in {"queued", "running"}:
             job.message = "正在取消..."
         await self._save_jobs(force=True)
+        return job
+
+    async def retry_failed(self, job_id: str) -> BatchJob:
+        """Reset failed/cancelled tasks of a finished job and re-run it."""
+        job = self._jobs.get(job_id)
+        if not job:
+            raise ValueError("任务不存在")
+        if job.status in {"queued", "running"}:
+            raise ValueError("任务正在运行中，无法重试")
+        active = self.has_active_job()
+        if active:
+            raise ValueError(f"已有任务正在运行：{active.id}，请等待完成或先取消")
+
+        retry_tasks = [t for t in job.tasks if t.status in {"failed", "cancelled"}]
+        if not retry_tasks:
+            raise ValueError("没有失败或已取消的子任务需要重试")
+
+        for task in retry_tasks:
+            task.status = "pending"
+            task.message = "等待重试"
+            task.remote_task_id = None
+            task.output_path = None
+            task.result_url = None
+
+        job.cancel_flag = False
+        job.status = "queued"
+        job.message = f"正在重试 {len(retry_tasks)} 个子任务"
+        job.finished_at = None
+
+        async with self._lock:
+            self._active_job_id = job.id
+
+        await self._save_jobs(force=True)
+        asyncio.create_task(self._run_job(job.id))
         return job
 
     async def delete_job(self, job_id: str) -> BatchJob:
@@ -472,6 +571,9 @@ class JobManager:
         # Pre-upload fixed reference images via STS direct upload (once per unique image)
         fixed_url_lookup: dict[str, str] = {}
         for task in job.tasks:
+            # Do not touch tasks that already finished (e.g. on retry runs)
+            if task.status in {"success", "failed", "cancelled"}:
+                continue
             for raw_path in (task.extra_image_1, task.extra_image_2):
                 if raw_path and raw_path not in fixed_url_lookup:
                     try:
@@ -479,12 +581,16 @@ class JobManager:
                         task.message = "正在上传固定参考图：" + Path(raw_path).name
                         url = await client.upload_image_direct(Path(raw_path))
                         fixed_url_lookup[raw_path] = url
+                        task.status = "pending"
+                        task.message = "固定参考图已上传"
                     except Exception as exc:
-                        # Mark all tasks that use this fixed image as failed
+                        # Mark all unfinished tasks that use this fixed image as failed
                         for t in job.tasks:
+                            if t.status == "success":
+                                continue
                             if t.extra_image_1 == raw_path or t.extra_image_2 == raw_path:
                                 t.status = "failed"
-                                t.message = "固定参考图上传失败：" + str(exc)
+                                t.message = "固定参考图上传失败：" + clip(exc)
                         await self._save_jobs()
                         # Continue without this fixed image
         await self._save_jobs()
@@ -672,7 +778,7 @@ class JobManager:
                 task.message = "已取消"
             else:
                 task.status = "failed"
-                task.message = str(exc)
+                task.message = clip(exc)
 
     @staticmethod
     def _guess_suffix(url: str, fallback: str) -> str:
