@@ -13,6 +13,9 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
 CONFIG_PATH = DATA_DIR / "settings.json"
 JOBS_PATH = DATA_DIR / "jobs.json"
+SCHEDULES_PATH = DATA_DIR / "schedules.json"
+DEFAULT_BASE_URL = "https://noova.cn"
+DEFAULT_IMAGE_PROXY_URL = "https://imageproxy.zhongzhuan.chat/api/upload"
 
 
 # --- 敏感目录保护 ---------------------------------------------------------
@@ -261,7 +264,7 @@ def model_supports_quality(model_id: str) -> bool:
 
 DEFAULT_SETTINGS: dict[str, Any] = {
     "api_key": "",
-    "base_url": "https://noova.cn",
+    "base_url": DEFAULT_BASE_URL,
     "model": "gpt-image-2",
     "aspect_ratio": "9:16",
     "quality": "auto",
@@ -271,7 +274,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "poll_timeout_sec": 300,
     "source_dir": "",
     "output_dir": str(BASE_DIR / "outputs"),
-    "image_proxy_url": "https://imageproxy.zhongzhuan.chat/api/upload",
+    "image_proxy_url": DEFAULT_IMAGE_PROXY_URL,
+    "auto_retry_failed": False,
+    "max_retry_count": 0,
 }
 
 
@@ -294,6 +299,15 @@ def load_settings() -> dict[str, Any]:
 
     merged = dict(DEFAULT_SETTINGS)
     merged.update({k: v for k, v in data.items() if k in DEFAULT_SETTINGS})
+    if not str(merged.get("base_url") or "").strip():
+        merged["base_url"] = DEFAULT_BASE_URL
+    if not str(merged.get("image_proxy_url") or "").strip():
+        merged["image_proxy_url"] = DEFAULT_IMAGE_PROXY_URL
+    merged["auto_retry_failed"] = bool(merged.get("auto_retry_failed") or False)
+    try:
+        merged["max_retry_count"] = max(0, min(int(merged.get("max_retry_count") or 0), 10))
+    except (TypeError, ValueError):
+        merged["max_retry_count"] = 0
     if merged.get("model") not in _MODELS_BY_ID:
         merged["model"] = DEFAULT_SETTINGS["model"]
     return merged
@@ -303,6 +317,15 @@ def save_settings(settings: dict[str, Any]) -> dict[str, Any]:
     ensure_dirs()
     merged = dict(DEFAULT_SETTINGS)
     merged.update({k: v for k, v in settings.items() if k in DEFAULT_SETTINGS})
+    if not str(merged.get("base_url") or "").strip():
+        merged["base_url"] = DEFAULT_BASE_URL
+    if not str(merged.get("image_proxy_url") or "").strip():
+        merged["image_proxy_url"] = DEFAULT_IMAGE_PROXY_URL
+    merged["auto_retry_failed"] = bool(merged.get("auto_retry_failed") or False)
+    try:
+        merged["max_retry_count"] = max(0, min(int(merged.get("max_retry_count") or 0), 10))
+    except (TypeError, ValueError):
+        merged["max_retry_count"] = 0
     with CONFIG_PATH.open("w", encoding="utf-8") as f:
         json.dump(merged, f, ensure_ascii=False, indent=2)
     return merged

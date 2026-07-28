@@ -45,7 +45,7 @@ def _migrate_legacy_data(new_dir: Path) -> None:
     legacy_dir = _ROOT / "data"
     if legacy_dir.resolve() == new_dir.resolve() or not legacy_dir.is_dir():
         return
-    for name in ("settings.json", "jobs.json"):
+    for name in ("settings.json", "jobs.json", "schedules.json"):
         src, dst = legacy_dir / name, new_dir / name
         if not src.is_file() or dst.exists():
             continue
@@ -106,6 +106,7 @@ _cfg.BASE_DIR = _ROOT
 _cfg.DATA_DIR = _DATA_DIR
 _cfg.CONFIG_PATH = _DATA_DIR / "settings.json"
 _cfg.JOBS_PATH = _DATA_DIR / "jobs.json"
+_cfg.SCHEDULES_PATH = _DATA_DIR / "schedules.json"
 
 # 输出目录：放在用户能直接找到、且一定可写的位置
 _OUTPUT_DIR = _resolve_default_output_dir()

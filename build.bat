@@ -72,7 +72,7 @@ powershell -NoProfile -Command "Compress-Archive -Path 'dist\batch_image_dist' -
 if errorlevel 1 (
   echo [警告] 压缩失败，但 dist\batch_image_dist 已经可用，可以手动压缩
 ) else (
-  powershell -NoProfile -Command "$z=[IO.Compression.ZipFile]::OpenRead((Resolve-Path '%ZIPNAME%')); $bad=@($z.Entries | Where-Object { $_.FullName -match 'settings\.json|jobs\.json' }); $z.Dispose(); if($bad.Count -gt 0){ Write-Host '        [警告] 压缩包内仍含配置文件：' ($bad.FullName -join ', ') } else { Write-Host '        已确认压缩包内不含 settings.json / jobs.json' }"
+  powershell -NoProfile -Command "$z=[IO.Compression.ZipFile]::OpenRead((Resolve-Path '%ZIPNAME%')); $bad=@($z.Entries | Where-Object { $_.FullName -match 'settings\.json|jobs\.json|schedules\.json' }); $z.Dispose(); if($bad.Count -gt 0){ Write-Host '        [警告] 压缩包内仍含配置文件：' ($bad.FullName -join ', ') } else { Write-Host '        已确认压缩包内不含 settings.json / jobs.json / schedules.json' }"
 )
 
 echo.

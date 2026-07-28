@@ -94,6 +94,7 @@ class NoovaClient:
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(connect=60.0, read=self.timeout, write=self.timeout, pool=60.0),
             follow_redirects=False,
+            trust_env=False,
             headers={
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             },
@@ -128,6 +129,7 @@ class NoovaClient:
         client = self._client or httpx.AsyncClient(
             timeout=httpx.Timeout(connect=60.0, read=self.timeout, write=self.timeout, pool=60.0),
             follow_redirects=False,
+            trust_env=False,
             headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
         )
         try:
@@ -230,6 +232,7 @@ class NoovaClient:
         client = self._client or httpx.AsyncClient(
             timeout=httpx.Timeout(connect=60.0, read=self.timeout, write=self.timeout, pool=60.0),
             follow_redirects=False,
+            trust_env=False,
             headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
         )
         proxy_url = await _validate_url_async(self.image_proxy_url, field_name="图床 API URL")
@@ -413,6 +416,7 @@ class NoovaClient:
         client = self._client or httpx.AsyncClient(
             timeout=httpx.Timeout(connect=60.0, read=self.timeout, write=self.timeout, pool=60.0),
             follow_redirects=False,
+            trust_env=False,
             headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
         )
         try:

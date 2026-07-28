@@ -19,9 +19,16 @@ const state = {
   lastTasks: [],
   resultFilter: "all",
   lastJobSig: "",
+  autoRetryFailed: false,
+  maxRetryCount: 0,
+  currentScheduleId: null,
+  scheduleTimer: null,
+  schedulePollInFlight: false,
 };
 
 const THEME_STORAGE_KEY = "batch-image-theme";
+const DEFAULT_BASE_URL = "https://noova.cn";
+const DEFAULT_IMAGE_PROXY_URL = "https://imageproxy.zhongzhuan.chat/api/upload";
 
 const RESULT_FILTERS = [
   { key: "all", label: "全部" },
@@ -60,6 +67,11 @@ const el = {
   btnCancel: document.getElementById("btn-cancel"),
   btnRetry: document.getElementById("btn-retry-failed"),
   btnDelete: document.getElementById("btn-delete-job"),
+  scheduleEnabled: document.getElementById("schedule-enabled"),
+  scheduleRunAt: document.getElementById("schedule-run-at"),
+  btnSaveSchedule: document.getElementById("btn-save-schedule"),
+  btnCancelSchedule: document.getElementById("btn-cancel-schedule"),
+  scheduleMessage: document.getElementById("schedule-message"),
   btnTheme: document.getElementById("btn-theme"),
   imageSize: document.getElementById("image-size"),
   settingsImageSize: document.getElementById("settings-image-size"),
@@ -75,6 +87,8 @@ const el = {
   settingsConcurrency: document.getElementById("settings-concurrency"),
   settingsPollInterval: document.getElementById("settings-poll-interval"),
   settingsPollTimeout: document.getElementById("settings-poll-timeout"),
+  settingsAutoRetryFailed: document.getElementById("settings-auto-retry-failed"),
+  settingsMaxRetryCount: document.getElementById("settings-max-retry-count"),
   settingsSourceDir: document.getElementById("settings-source-dir"),
   settingsOutputDir: document.getElementById("settings-output-dir"),
   settingsMessage: document.getElementById("settings-message"),
@@ -123,6 +137,37 @@ function statusLabel(status) {
     completed: "已完成",
   };
   return map[status] || status;
+}
+
+function scheduleStatusLabel(status) {
+  const map = {
+    pending: "待执行",
+    waiting: "等待空闲",
+    submitting: "提交中",
+    submitted: "已提交",
+    cancelled: "已取消",
+    failed: "失败",
+  };
+  return map[status] || status || "未设置";
+}
+
+function pad2(value) {
+  return String(value).padStart(2, "0");
+}
+
+function toDateTimeLocalValue(date) {
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}T${pad2(date.getHours())}:${pad2(date.getMinutes())}:${pad2(date.getSeconds())}`;
+}
+
+function scheduleTimeToInputValue(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  return text.includes("T") ? text.slice(0, 19) : text.replace(" ", "T").slice(0, 19);
+}
+
+function ensureDefaultScheduleTime() {
+  if (!el.scheduleRunAt || el.scheduleRunAt.value) return;
+  el.scheduleRunAt.value = toDateTimeLocalValue(new Date(Date.now() + 60 * 1000));
 }
 
 async function api(path, options = {}) {
@@ -727,6 +772,12 @@ function setSettingsMessage(message, isError = false) {
   el.settingsMessage.classList.toggle("error", !!isError);
 }
 
+function setScheduleMessage(message, isError = false) {
+  if (!el.scheduleMessage) return;
+  el.scheduleMessage.textContent = message || "";
+  el.scheduleMessage.classList.toggle("error", !!isError);
+}
+
 function openSettings() {
   state.lastFocusedElement = document.activeElement;
   el.settingsModal.classList.remove("hidden");
@@ -792,6 +843,15 @@ function applyModelValue(selectEl, customEl, value) {
   }
 }
 
+function syncRetrySettingsControls() {
+  if (!el.settingsAutoRetryFailed || !el.settingsMaxRetryCount) return;
+  const enabled = !!el.settingsAutoRetryFailed.checked;
+  el.settingsMaxRetryCount.disabled = !enabled;
+  if (enabled && Number(el.settingsMaxRetryCount.value || 0) < 1) {
+    el.settingsMaxRetryCount.value = 1;
+  }
+}
+
 function bindModelSelectors() {
   if (el.model) {
     el.model.addEventListener("change", () => {
@@ -827,12 +887,17 @@ async function loadSettings() {
       ? `已保存：${s.api_key_masked || "****"}（留空不修改）`
       : "尚未配置 API Key";
   }
-  el.baseUrl.value = s.base_url || "https://noova.cn";
-  if (el.imageProxyUrl) el.imageProxyUrl.value = s.image_proxy_url || "";
+  el.baseUrl.value = s.base_url || DEFAULT_BASE_URL;
+  if (el.imageProxyUrl) el.imageProxyUrl.value = s.image_proxy_url || DEFAULT_IMAGE_PROXY_URL;
   applyModelValue(el.settingsModel, el.settingsModelCustom, s.model || "gpt-image-2");
   el.settingsConcurrency.value = s.concurrency || 10;
   el.settingsPollInterval.value = s.poll_interval_sec || 20;
   el.settingsPollTimeout.value = s.poll_timeout_sec || 300;
+  state.autoRetryFailed = !!s.auto_retry_failed;
+  state.maxRetryCount = Math.max(0, Math.min(Number(s.max_retry_count || 0), 10));
+  if (el.settingsAutoRetryFailed) el.settingsAutoRetryFailed.checked = state.autoRetryFailed;
+  if (el.settingsMaxRetryCount) el.settingsMaxRetryCount.value = state.maxRetryCount;
+  syncRetrySettingsControls();
   applyModelTimeoutHint(selectedSettingsModel(), el.settingsPollTimeout);
   el.settingsSourceDir.value = s.source_dir || "";
   el.settingsOutputDir.value = s.output_dir || "";
@@ -863,8 +928,8 @@ async function saveSettings() {
   const modelTimeout = Number(getModelInfo(model).poll_timeout_sec || 0);
   const pollTimeout = Math.max(Number(el.settingsPollTimeout.value || 300), modelTimeout);
   const body = {
-    base_url: el.baseUrl.value.trim() || "https://noova.cn",
-    image_proxy_url: el.imageProxyUrl ? el.imageProxyUrl.value.trim() : "",
+    base_url: el.baseUrl.value.trim() || DEFAULT_BASE_URL,
+    image_proxy_url: el.imageProxyUrl ? (el.imageProxyUrl.value.trim() || DEFAULT_IMAGE_PROXY_URL) : DEFAULT_IMAGE_PROXY_URL,
     model,
     aspect_ratio: el.settingsAspectRatio.value,
     quality: el.settingsQuality.value,
@@ -872,6 +937,8 @@ async function saveSettings() {
     concurrency: Number(el.settingsConcurrency.value || 10),
     poll_interval_sec: Number(el.settingsPollInterval.value || 20),
     poll_timeout_sec: pollTimeout,
+    auto_retry_failed: !!el.settingsAutoRetryFailed?.checked,
+    max_retry_count: Math.max(0, Math.min(Number(el.settingsMaxRetryCount?.value || 0), 10)),
     source_dir: el.settingsSourceDir.value.trim(),
     output_dir: el.settingsOutputDir.value.trim(),
   };
@@ -978,18 +1045,18 @@ function collectPrompts() {
     .filter((item) => item.enabled && item.prompt);
 }
 
-async function startJob() {
-  const prompts = collectPrompts();
+function validateJobPrompts(prompts) {
   if (!prompts.length) {
-    setActionMessage("请至少填写 1 个有效提示词内容", true);
-    return;
+    throw new Error("请至少填写 1 个有效提示词内容");
   }
   if (prompts.length > 10) {
-    setActionMessage("最多支持 10 个提示词", true);
-    return;
+    throw new Error("最多支持 10 个提示词");
   }
+}
 
-  const body = {
+function buildJobPayload(prompts = collectPrompts()) {
+  const maxRetryCount = Math.max(0, Math.min(Number(state.maxRetryCount || 0), 10));
+  return {
     source_dir: el.sourceDir.value.trim(),
     output_dir: el.outputDir.value.trim(),
     model: selectedModel(),
@@ -998,11 +1065,19 @@ async function startJob() {
     image_size: el.imageSize ? el.imageSize.value : "",
     concurrency: Number(el.concurrency.value || 10),
     poll_interval_sec: Number(el.pollInterval?.value || 20),
+    auto_retry_failed: !!state.autoRetryFailed && maxRetryCount > 0,
+    max_retry_count: maxRetryCount,
     prompts,
   };
+}
+
+async function startJob() {
+  const prompts = collectPrompts();
 
   el.btnStart.disabled = true;
   try {
+    validateJobPrompts(prompts);
+    const body = buildJobPayload(prompts);
     const res = await api("/api/jobs", {
       method: "POST",
       body: JSON.stringify(body),
@@ -1019,6 +1094,136 @@ async function startJob() {
   } finally {
     el.btnStart.disabled = false;
   }
+}
+
+function renderSchedule(schedule) {
+  if (!el.scheduleMessage) return;
+  if (!schedule) {
+    state.currentScheduleId = null;
+    if (el.btnCancelSchedule) el.btnCancelSchedule.disabled = true;
+    setScheduleMessage("");
+    return;
+  }
+
+  state.currentScheduleId = schedule.id || null;
+  if (el.scheduleEnabled && ["pending", "waiting", "submitting"].includes(schedule.status)) {
+    el.scheduleEnabled.checked = true;
+  }
+  if (el.scheduleRunAt && schedule.run_at) {
+    el.scheduleRunAt.value = scheduleTimeToInputValue(schedule.run_at);
+  }
+  if (el.btnCancelSchedule) {
+    el.btnCancelSchedule.disabled = !["pending", "waiting"].includes(schedule.status);
+  }
+
+  const statusText = scheduleStatusLabel(schedule.status);
+  const timeText = schedule.run_at ? ` · ${schedule.run_at}` : "";
+  const jobText = schedule.job_id ? ` · 任务 ${String(schedule.job_id).slice(0, 8)}` : "";
+  setScheduleMessage(`定时${statusText}${timeText}${jobText}${schedule.message ? ` · ${schedule.message}` : ""}`, schedule.status === "failed");
+}
+
+function pickVisibleSchedule(schedules) {
+  return (
+    schedules.find((item) => ["pending", "waiting", "submitting"].includes(item.status)) ||
+    schedules[0] ||
+    null
+  );
+}
+
+async function refreshSchedules() {
+  if (state.schedulePollInFlight) return null;
+  let visibleSchedule = null;
+  state.schedulePollInFlight = true;
+  try {
+    const res = await api("/api/schedules");
+    const schedules = res.data || [];
+    const schedule = pickVisibleSchedule(schedules);
+    visibleSchedule = schedule;
+    renderSchedule(schedule);
+
+    if (schedule?.status === "submitted" && schedule.job_id) {
+      if (state.currentJobId !== schedule.job_id) {
+        state.currentJobId = schedule.job_id;
+        state.lastJobSig = "";
+        state.resultFilter = "all";
+      }
+      startPolling();
+      stopSchedulePolling();
+    } else if (!schedule || ["cancelled", "failed"].includes(schedule.status)) {
+      stopSchedulePolling();
+    }
+    return visibleSchedule;
+  } finally {
+    state.schedulePollInFlight = false;
+  }
+}
+
+async function loadSchedules() {
+  const schedule = await refreshSchedules();
+  if (schedule && ["pending", "waiting", "submitting"].includes(schedule.status)) {
+    startSchedulePolling();
+  }
+}
+
+function startSchedulePolling() {
+  if (state.scheduleTimer) return;
+  state.scheduleTimer = setInterval(() => {
+    refreshSchedules().catch((err) => {
+      setScheduleMessage(err.message || String(err), true);
+    });
+  }, 5000);
+}
+
+function stopSchedulePolling() {
+  if (state.scheduleTimer) {
+    clearInterval(state.scheduleTimer);
+    state.scheduleTimer = null;
+  }
+}
+
+async function saveSchedule() {
+  if (!el.scheduleEnabled?.checked) {
+    setScheduleMessage("请先启用定时运行", true);
+    return;
+  }
+  const runAt = (el.scheduleRunAt?.value || "").trim();
+  if (!runAt) {
+    setScheduleMessage("请选择定时运行时间", true);
+    return;
+  }
+  const runAtDate = new Date(runAt);
+  if (Number.isNaN(runAtDate.getTime()) || runAtDate.getTime() <= Date.now()) {
+    setScheduleMessage("定时运行时间必须晚于当前时间", true);
+    return;
+  }
+
+  const prompts = collectPrompts();
+  el.btnSaveSchedule.disabled = true;
+  try {
+    validateJobPrompts(prompts);
+    const res = await api("/api/schedules", {
+      method: "POST",
+      body: JSON.stringify({
+        run_at: runAt,
+        payload: buildJobPayload(prompts),
+      }),
+    });
+    renderSchedule(res.data);
+    setScheduleMessage(res.message || "定时任务已保存");
+    startSchedulePolling();
+  } catch (err) {
+    setScheduleMessage(err.message || String(err), true);
+  } finally {
+    el.btnSaveSchedule.disabled = false;
+  }
+}
+
+async function cancelSchedule() {
+  if (!state.currentScheduleId) return;
+  const res = await api(`/api/schedules/${state.currentScheduleId}`, { method: "DELETE" });
+  renderSchedule(res.data);
+  setScheduleMessage(res.message || "定时任务已取消");
+  stopSchedulePolling();
 }
 
 async function cancelJob() {
@@ -1150,7 +1355,10 @@ function renderJob(job) {
     job.failed > 0 ? `失败${job.failed}` : "",
     job.cancelled > 0 ? `取消${job.cancelled}` : "",
   ].filter(Boolean).join("/");
-  el.jobSummary.textContent = `任务 ${job.id.slice(0, 8)} · ${statusLabel(job.status)}${statusBreakdown ? " [" + statusBreakdown + "]" : ""} · ${job.message || ""}`;
+  const retryText = job.max_retry_count > 0
+    ? ` · 重试 ${job.retry_attempt_count || 0}/${job.max_retry_count}`
+    : "";
+  el.jobSummary.textContent = `任务 ${job.id.slice(0, 8)} · ${statusLabel(job.status)}${statusBreakdown ? " [" + statusBreakdown + "]" : ""}${retryText} · ${job.message || ""}`;
   el.statTotal.textContent = job.total || 0;
   el.statSuccess.textContent = job.success || 0;
   el.statFailed.textContent = job.failed || 0;
@@ -1225,6 +1433,9 @@ function bindEvents() {
       setSettingsMessage(err.message || String(err), true);
     }
   });
+  if (el.settingsAutoRetryFailed) {
+    el.settingsAutoRetryFailed.addEventListener("change", syncRetrySettingsControls);
+  }
   document.getElementById("btn-pick-source").addEventListener("click", async () => {
     try {
       const path = await pickFolder("选择源图片文件夹", el.sourceDir.value);
@@ -1294,6 +1505,28 @@ function bindEvents() {
     renderPrompts();
   });
   el.btnStart.addEventListener("click", startJob);
+  if (el.btnSaveSchedule) {
+    el.btnSaveSchedule.addEventListener("click", saveSchedule);
+  }
+  if (el.btnCancelSchedule) {
+    el.btnCancelSchedule.addEventListener("click", async () => {
+      try {
+        await cancelSchedule();
+      } catch (err) {
+        setScheduleMessage(err.message || String(err), true);
+      }
+    });
+  }
+  if (el.scheduleEnabled) {
+    el.scheduleEnabled.addEventListener("change", () => {
+      if (el.scheduleEnabled.checked) {
+        ensureDefaultScheduleTime();
+        setScheduleMessage("");
+      } else {
+        setScheduleMessage("");
+      }
+    });
+  }
   el.btnCancel.addEventListener("click", async () => {
     try {
       await cancelJob();
@@ -1371,6 +1604,7 @@ function bindEvents() {
   });
   window.addEventListener("beforeunload", () => {
     stopPolling();
+    stopSchedulePolling();
   });
 }
 
@@ -1394,6 +1628,12 @@ async function init() {
     await restoreLatestJob();
   } catch (err) {
     setActionMessage(`恢复最近任务失败: ${err.message || err}`, true);
+  }
+  ensureDefaultScheduleTime();
+  try {
+    await loadSchedules();
+  } catch (err) {
+    setScheduleMessage(`加载定时任务失败: ${err.message || err}`, true);
   }
   if (typeof window.refreshIcons === "function") {
     window.refreshIcons();

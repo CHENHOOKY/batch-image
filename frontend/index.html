@@ -131,6 +131,26 @@
             </div>
           </div>
 
+          <div class="schedule-panel">
+            <label class="toggle-field">
+              <input id="schedule-enabled" type="checkbox" />
+              <span>定时运行</span>
+            </label>
+            <label class="field compact schedule-time">
+              <span>运行时间</span>
+              <input id="schedule-run-at" type="datetime-local" step="1" />
+            </label>
+            <button id="btn-save-schedule" class="btn secondary icon-btn" type="button">
+              <i data-lucide="calendar-clock"></i>
+              <span>保存定时</span>
+            </button>
+            <button id="btn-cancel-schedule" class="btn ghost icon-btn" type="button" disabled>
+              <i data-lucide="calendar-x"></i>
+              <span>取消定时</span>
+            </button>
+            <span id="schedule-message" class="status-text"></span>
+          </div>
+
           <div class="prompts-block">
             <div class="section-head prompts-head">
               <div>
@@ -260,12 +280,12 @@
 
           <label class="field field-span-2">
             <span>API Base URL</span>
-            <input id="base-url" type="text" placeholder="https://noova.cn" />
+            <input id="base-url" type="text" value="https://noova.cn" placeholder="https://noova.cn" />
           </label>
 
           <label class="field field-span-2">
             <span>图床 API URL</span>
-            <input id="image-proxy-url" type="text" placeholder="https://imageproxy.zhongzhuan.chat/api/upload" />
+            <input id="image-proxy-url" type="text" value="https://imageproxy.zhongzhuan.chat/api/upload" placeholder="https://imageproxy.zhongzhuan.chat/api/upload" />
             <span class="field-hint">图片上传地址，留空则回退到 base64 内嵌</span>
           </label>
 
@@ -307,6 +327,19 @@
           <label class="field">
             <span>超时时间（秒）</span>
             <input id="settings-poll-timeout" type="number" min="30" max="3600" />
+          </label>
+
+          <label class="field">
+            <span>失败自动重试</span>
+            <div class="toggle-row">
+              <input id="settings-auto-retry-failed" type="checkbox" />
+              <span>启用</span>
+            </div>
+          </label>
+
+          <label class="field">
+            <span>最大重试次数</span>
+            <input id="settings-max-retry-count" type="number" min="0" max="10" step="1" />
           </label>
 
           <label class="field field-span-2">

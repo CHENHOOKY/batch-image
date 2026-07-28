@@ -21,17 +21,27 @@ from .config import (
     validate_external_http_url,
 )
 from .job_manager import job_manager
-from .models import ApiResponse, BatchJobCreate, SettingsUpdate
+from .models import ApiResponse, BatchJobCreate, ScheduleCreate, SettingsUpdate
 from .security import APP_TOKEN, HostGuardMiddleware, TokenAuthMiddleware
 
 ensure_dirs()
 
-app = FastAPI(title="批量出图", version="1.6.0")
+app = FastAPI(title="批量出图", version="1.7.0")
 frontend_dir = BASE_DIR / "frontend"
 
 # 中间件按添加顺序的逆序执行：先校验 Host（阻断 DNS rebinding），再校验令牌。
 app.add_middleware(TokenAuthMiddleware, token=APP_TOKEN)
 app.add_middleware(HostGuardMiddleware)
+
+
+@app.on_event("startup")
+async def _start_background_workers() -> None:
+    job_manager.start_scheduler()
+
+
+@app.on_event("shutdown")
+async def _stop_background_workers() -> None:
+    await job_manager.stop_scheduler()
 
 # --- Non-blocking folder/file picker sessions ---
 
@@ -181,7 +191,7 @@ async def _run_file_picker(session_id: str, title: str, initial: str) -> None:
 
 @app.get("/api/health")
 async def health() -> dict[str, Any]:
-    return {"ok": True, "service": "batch-image", "version": "1.6.0"}
+    return {"ok": True, "service": "batch-image", "version": "1.7.0"}
 
 
 @app.get("/api/settings")
@@ -341,6 +351,32 @@ async def list_jobs() -> ApiResponse:
     return ApiResponse(data=job_manager.list_jobs())
 
 
+@app.get("/api/schedules")
+async def list_schedules() -> ApiResponse:
+    return ApiResponse(data=job_manager.list_schedules())
+
+
+@app.post("/api/schedules")
+async def create_schedule(body: ScheduleCreate) -> ApiResponse:
+    try:
+        schedule = await job_manager.create_schedule(
+            run_at=body.run_at,
+            payload=body.payload.model_dump(),
+        )
+        return ApiResponse(message="定时任务已保存", data=schedule.to_dict())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/api/schedules/{schedule_id}")
+async def cancel_schedule(schedule_id: str) -> ApiResponse:
+    try:
+        schedule = await job_manager.cancel_schedule(schedule_id)
+        return ApiResponse(message="定时任务已取消", data=schedule.to_dict())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.get("/api/jobs/{job_id}")
 async def get_job(job_id: str, sig: str = "") -> JSONResponse:
     """任务详情。
@@ -411,6 +447,7 @@ async def get_credit() -> ApiResponse:
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(connect=15.0, read=30.0, write=30.0, pool=15.0),
             follow_redirects=False,
+            trust_env=False,
         ) as client:
             resp = await client.get(
                 f"{base_url}/api/v1/gateway/credit",
@@ -511,5 +548,3 @@ async def static_asset(asset: str) -> FileResponse:
     if not target.is_file():
         raise HTTPException(status_code=404, detail="资源不存在")
     return FileResponse(target, media_type=media_type)
-
-

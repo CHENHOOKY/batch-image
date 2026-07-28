@@ -414,6 +414,50 @@ textarea {
   min-width: 0;
 }
 
+.toggle-row,
+.toggle-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.toggle-row input,
+.toggle-field input {
+  width: 16px;
+  min-width: 16px;
+  min-height: 16px;
+}
+
+.toggle-row span,
+.toggle-field span {
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.schedule-panel {
+  display: grid;
+  grid-template-columns: minmax(110px, 0.55fr) minmax(220px, 1fr) auto auto minmax(180px, 1.3fr);
+  align-items: end;
+  gap: 10px;
+  padding: 12px;
+  background: var(--panel-soft);
+  border: 1px solid var(--line);
+  border-radius: calc(var(--radius) - 4px);
+}
+
+.schedule-panel .toggle-field {
+  align-self: center;
+  min-height: 36px;
+}
+
+.schedule-panel .status-text {
+  align-self: center;
+  min-width: 0;
+  white-space: normal;
+}
+
 /* ---------- Buttons ---------- */
 
 .btn {
@@ -1330,6 +1374,14 @@ textarea:focus-visible,
   .options-row {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
+
+  .schedule-panel {
+    grid-template-columns: minmax(110px, 0.8fr) minmax(220px, 1.2fr) repeat(2, auto);
+  }
+
+  .schedule-panel .status-text {
+    grid-column: 1 / -1;
+  }
 }
 
 @media (max-width: 1100px) {
@@ -1385,8 +1437,13 @@ textarea:focus-visible,
   .config-grid,
   .settings-grid,
   .prompt-list,
-  .options-row {
+  .options-row,
+  .schedule-panel {
     grid-template-columns: 1fr;
+  }
+
+  .schedule-panel .btn {
+    width: 100%;
   }
 
   .field-span-2 {

@@ -20,6 +20,8 @@ class SettingsUpdate(BaseModel):
     source_dir: str | None = None
     output_dir: str | None = None
     image_proxy_url: str | None = None
+    auto_retry_failed: bool | None = None
+    max_retry_count: int | None = Field(default=None, ge=0, le=10)
 
     @field_validator("base_url", "image_proxy_url")
     @classmethod
@@ -105,6 +107,8 @@ class BatchJobCreate(BaseModel):
     image_size: str | None = None
     concurrency: int | None = Field(default=None, ge=1, le=10)
     poll_interval_sec: float | None = Field(default=None, ge=1, le=60)
+    auto_retry_failed: bool | None = None
+    max_retry_count: int | None = Field(default=None, ge=0, le=10)
     prompts: list[PromptItem] = Field(..., min_length=1, max_length=10)
     image_extensions: list[str] = Field(
         default_factory=lambda: [".jpg", ".jpeg", ".png", ".webp", ".bmp"]
@@ -171,6 +175,11 @@ class BatchJobCreate(BaseModel):
         if cleaned not in {"1K", "2K", "4K"}:
             raise ValueError("不支持的图像尺寸")
         return cleaned
+
+
+class ScheduleCreate(BaseModel):
+    run_at: str = Field(..., min_length=1)
+    payload: BatchJobCreate
 
 
 class ApiResponse(BaseModel):
