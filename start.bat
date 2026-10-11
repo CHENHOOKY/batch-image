@@ -2,9 +2,12 @@
 chcp 65001 >nul
 cd /d "%~dp0"
 
+REM ASCII-only on purpose: cmd.exe cannot reliably parse batch files that
+REM contain multi-byte characters. Chinese output comes from run.py instead.
+
 set "PY="
 
-REM Prefer the real Python install over the Windows Store stub
+REM Prefer a real Python install over the Windows Store stub.
 if exist "%LocalAppData%\Programs\Python\Python313\python.exe" set "PY=%LocalAppData%\Programs\Python\Python313\python.exe"
 if not defined PY if exist "%LocalAppData%\Programs\Python\Python312\python.exe" set "PY=%LocalAppData%\Programs\Python\Python312\python.exe"
 if not defined PY if exist "%LocalAppData%\Programs\Python\Python311\python.exe" set "PY=%LocalAppData%\Programs\Python\Python311\python.exe"
@@ -16,20 +19,30 @@ if not defined PY (
 )
 if not defined PY if exist "C:\Windows\py.exe" set "PY=C:\Windows\py.exe"
 if not defined PY (
-  echo 未找到 Python，请先安装 Python 3.10+
+  echo [batch-image] Python 3.10+ not found. Please install Python first.
   pause
   exit /b 1
 )
 
-echo [批量出图] 使用解释器: %PY%
-echo [批量出图] 安装依赖...
-"%PY%" -m pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple --quiet
+echo [batch-image] interpreter: %PY%
+
+REM Skip pip when the dependencies are already importable: re-installing on
+REM every start is slow and, when it fails, used to abort the script and leave
+REM the previous instance holding port 8787.
+"%PY%" -c "import fastapi, uvicorn, httpx, pydantic, multipart, aiofiles, PIL" 2>nul
 if errorlevel 1 (
-  echo 依赖安装失败，请检查 Python / 网络
-  pause
-  exit /b 1
+  echo [batch-image] installing dependencies...
+  "%PY%" -m pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple --quiet
+  if errorlevel 1 (
+    echo [batch-image] dependency install failed, check Python / network.
+    pause
+    exit /b 1
+  )
 )
 
-echo [批量出图] 启动服务...
+REM run.py probes 8787-8800 and stops a leftover instance of this tool first,
+REM so an old server can never keep serving on port 8787.
+set "PYTHONUTF8=1"
+echo [batch-image] starting server, a leftover instance is stopped automatically...
 "%PY%" run.py
 pause

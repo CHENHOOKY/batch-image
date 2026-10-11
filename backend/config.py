@@ -14,7 +14,8 @@ DATA_DIR = BASE_DIR / "data"
 CONFIG_PATH = DATA_DIR / "settings.json"
 JOBS_PATH = DATA_DIR / "jobs.json"
 SCHEDULES_PATH = DATA_DIR / "schedules.json"
-DEFAULT_BASE_URL = "https://noova.cn"
+DEFAULT_BASE_URL = "https://noova.vip"
+LEGACY_DEFAULT_BASE_URL = "https://noova.cn"
 DEFAULT_IMAGE_PROXY_URL = "https://imageproxy.zhongzhuan.chat/api/upload"
 
 
@@ -111,25 +112,8 @@ def _is_within(child: Path, parent: Path) -> bool:
 
 # --- Model capability definitions ---
 
+#: GPT Image 系列（sunburst / flare / GPT-Image-2-L）支持的比例，仅 1K
 GPT_IMAGE_RATIOS = [
-    "1:1",
-    "16:9",
-    "9:16",
-    "4:3",
-    "3:4",
-    "3:2",
-    "2:3",
-    "5:4",
-    "4:5",
-    "21:9",
-    "9:21",
-    "1:2",
-    "2:1",
-]
-
-GPT_IMAGE_2_G_RATIOS = ["auto", *GPT_IMAGE_RATIOS]
-
-NANO_BANANA_RATIOS = [
     "auto",
     "1:1",
     "16:9",
@@ -138,58 +122,145 @@ NANO_BANANA_RATIOS = [
     "3:4",
     "3:2",
     "2:3",
-    "5:4",
-    "4:5",
     "21:9",
+    "9:21",
+    "2:1",
+    "1:2",
+    "3:1",
+    "1:3",
 ]
 
-NANO_BANANA_2_EXTRA_RATIOS = ["1:4", "4:1", "1:8", "8:1"]
+#: nano-banana-2 / Nano Banana 2.1 支持的比例
+NANO_BANANA_RATIOS = [
+    "auto",
+    "1:1",
+    "3:2",
+    "2:3",
+    "16:9",
+    "9:16",
+    "21:9",
+    "5:4",
+    "4:5",
+    "1:4",
+    "4:1",
+    "1:8",
+    "8:1",
+    "4:3",
+    "3:4",
+]
 
+#: nano-banana-pro 支持的比例（不含极限长宽比）
+NANO_BANANA_PRO_RATIOS = [
+    "auto",
+    "1:1",
+    "16:9",
+    "9:16",
+    "21:9",
+    "2:3",
+    "3:2",
+    "4:3",
+    "3:4",
+    "4:5",
+    "5:4",
+]
+
+#: 比例别名表。当前模型直接透传比例值，保留结构以便后续做兼容映射。
+GPT_IMAGE_ASPECT_RATIO_ALIASES = {"1:1": "1:1", "16:9": "16:9", "9:16": "9:16"}
+
+#: nano 系列支持的分辨率档位（上游必传 imageSize）
 IMAGE_SIZES_FULL = ["1K", "2K", "4K"]
-IMAGE_SIZES_1K_ONLY = ["1K"]
+
+#: GPT Image 系列上游要求传「比例对应的具体尺寸」，而界面仍然展示比例。
+GPT_IMAGE_PIXEL_VALUES = {
+    "auto": "auto",
+    "1:1": "1024x1024",
+    "16:9": "1280x720",
+    "9:16": "720x1280",
+    "4:3": "1152x864",
+    "3:4": "864x1152",
+    "3:2": "1536x1024",
+    "2:3": "1024x1536",
+    "21:9": "1456x624",
+    "9:21": "624x1456",
+    "2:1": "1536x768",
+    "1:2": "768x1536",
+    "3:1": "2048x688",
+    "1:3": "688x2048",
+}
+
+GPT_IMAGE_COMMON = {
+    "endpoint": "/api/v1/invoke",
+    "poll_endpoint": "/v1/content",
+    "poll_param": "id",
+    "image_param": "referenceImages",
+    "aspect_ratio_param": "aspect_ratio",
+    "aspect_ratio_aliases": GPT_IMAGE_ASPECT_RATIO_ALIASES,
+    "aspect_ratio_values": GPT_IMAGE_PIXEL_VALUES,
+    "include_image_size": False,
+    "aspect_ratios": GPT_IMAGE_RATIOS,
+    "image_sizes": [],
+    "supports_quality": True,
+}
+
+NANO_BANANA_COMMON = {
+    "endpoint": "/api/v1/invoke",
+    "poll_endpoint": "/v1/content",
+    "poll_param": "id",
+    "image_param": "referenceImages",
+    "aspect_ratio_param": "aspect_ratio",
+    "aspect_ratio_aliases": {},
+    # nano 系列直接传比例本身，不做像素换算
+    "aspect_ratio_values": {},
+    # nano 系列必须显式传 imageSize（1K/2K/4K）
+    "include_image_size": True,
+    "image_sizes": IMAGE_SIZES_FULL,
+    "supports_quality": False,
+}
+
+
+def _model(model_id: str, common: dict[str, Any], **overrides: Any) -> dict[str, Any]:
+    """按统一协议生成一条模型定义，模型编码同时作为上游 model 字段。"""
+    return {
+        **common,
+        "id": model_id,
+        "name": model_id,
+        "api_model": model_id,
+        **overrides,
+    }
+
 
 MODELS: list[dict[str, Any]] = [
-    {
-        "id": "gpt-image-2",
-        "name": "gpt-image-2",
-        "endpoint": "/v1/draw/completions",
-        "image_param": "urls",
-        "aspect_ratios": GPT_IMAGE_RATIOS,
-        "image_sizes": [],
-        "supports_quality": True,
-    },
-    {
-        "id": "gpt-image-2-G",
-        "name": "gpt-image-2-G",
-        "endpoint": "/api/v1/gateway/invoke",
-        "image_param": "urls",
-        "poll_param": "task_id",
-        "poll_timeout_sec": 960,
-        "aspect_ratios": GPT_IMAGE_2_G_RATIOS,
-        "image_sizes": IMAGE_SIZES_1K_ONLY,
-        "supports_quality": True,
-    },
-    {
-        "id": "nano-banana-2",
-        "name": "nano-banana-2",
-        "endpoint": "/v1/draw/nano-banana",
-        "image_param": "urls",
-        "aspect_ratios": NANO_BANANA_RATIOS + NANO_BANANA_2_EXTRA_RATIOS,
-        "image_sizes": IMAGE_SIZES_FULL,
-        "supports_quality": False,
-    },
-    {
-        "id": "nano-banana-pro",
-        "name": "nano-banana-pro",
-        "endpoint": "/v1/draw/nano-banana",
-        "image_param": "urls",
-        "image_sizes": IMAGE_SIZES_FULL,
-        "aspect_ratios": NANO_BANANA_RATIOS,
-        "supports_quality": False,
-    },
+    _model("GPT Image 2.5 sunburst", GPT_IMAGE_COMMON),
+    _model("gpt-image-2.5-flare-1K", GPT_IMAGE_COMMON),
+    _model("GPT-Image-2-L", GPT_IMAGE_COMMON),
+    _model("nano-banana-2", NANO_BANANA_COMMON, aspect_ratios=NANO_BANANA_RATIOS),
+    _model("Nano Banana 2.1", NANO_BANANA_COMMON, aspect_ratios=NANO_BANANA_RATIOS),
+    _model("nano-banana-pro", NANO_BANANA_COMMON, aspect_ratios=NANO_BANANA_PRO_RATIOS),
 ]
 
 _MODELS_BY_ID: dict[str, dict[str, Any]] = {m["id"]: m for m in MODELS}
+DEFAULT_MODEL_ID = "GPT Image 2.5 sunburst"
+#: 旧版本模型编码到新模型编码的迁移映射
+_LEGACY_MODEL_ALIASES = {
+    "gpt-image-2": "GPT Image 2.5 sunburst",
+    "gpt-image-2-G": "gpt-image-2.5-flare-1K",
+}
+
+#: 接口层允许的全部比例：各模型比例并集，外加历史遗留的像素尺寸写法
+_LEGACY_ASPECT_RATIOS = [
+    "1024x1024", "1536x1024", "1024x1536", "1774x887", "887x1774", "800x800",
+]
+ALL_ASPECT_RATIOS: frozenset[str] = frozenset(
+    {ratio for info in MODELS for ratio in info["aspect_ratios"]}
+    | set(_LEGACY_ASPECT_RATIOS)
+)
+
+
+def normalize_model_id(model_id: Any) -> str:
+    """把旧模型编码迁移到新编码；无法识别时回退到默认模型。"""
+    cleaned = str(model_id or "").strip()
+    cleaned = _LEGACY_MODEL_ALIASES.get(cleaned, cleaned)
+    return cleaned if cleaned in _MODELS_BY_ID else DEFAULT_MODEL_ID
 
 
 def validate_external_http_url(value: str, *, field_name: str = "URL", resolve_host: bool = True) -> str:
@@ -227,25 +298,17 @@ def validate_external_http_url(value: str, *, field_name: str = "URL", resolve_h
 
 
 def get_model_info(model_id: str) -> dict[str, Any]:
-    """Return model capability dict, falling back to gpt-image-2."""
-    return _MODELS_BY_ID.get(model_id, _MODELS_BY_ID["gpt-image-2"])
-
-
-def get_model_ratios(model_id: str) -> list[str]:
-    return get_model_info(model_id)["aspect_ratios"]
-
-
-def get_model_sizes(model_id: str) -> list[str]:
-    return get_model_info(model_id)["image_sizes"]
+    """Return model capability dict, including the old L-model alias."""
+    normalized = _LEGACY_MODEL_ALIASES.get(model_id, model_id)
+    return _MODELS_BY_ID.get(normalized, _MODELS_BY_ID[DEFAULT_MODEL_ID])
 
 
 def get_model_endpoint(model_id: str) -> str:
     return get_model_info(model_id)["endpoint"]
 
 
-def get_model_image_param(model_id: str) -> str:
-    """Return the JSON field name for image references (all current models: 'urls')."""
-    return get_model_info(model_id)["image_param"]
+def get_model_poll_endpoint(model_id: str) -> str:
+    return str(get_model_info(model_id).get("poll_endpoint") or "/v1/draw/result")
 
 
 def get_model_poll_param(model_id: str) -> str:
@@ -265,7 +328,7 @@ def model_supports_quality(model_id: str) -> bool:
 DEFAULT_SETTINGS: dict[str, Any] = {
     "api_key": "",
     "base_url": DEFAULT_BASE_URL,
-    "model": "gpt-image-2",
+    "model": DEFAULT_MODEL_ID,
     "aspect_ratio": "9:16",
     "quality": "auto",
     "image_size": "",
@@ -299,6 +362,12 @@ def load_settings() -> dict[str, Any]:
 
     merged = dict(DEFAULT_SETTINGS)
     merged.update({k: v for k, v in data.items() if k in DEFAULT_SETTINGS})
+    if str(merged.get("base_url") or "").strip().rstrip("/") == LEGACY_DEFAULT_BASE_URL:
+        merged["base_url"] = DEFAULT_BASE_URL
+        try:
+            save_settings(merged)
+        except OSError:
+            pass
     if not str(merged.get("base_url") or "").strip():
         merged["base_url"] = DEFAULT_BASE_URL
     if not str(merged.get("image_proxy_url") or "").strip():
@@ -308,8 +377,13 @@ def load_settings() -> dict[str, Any]:
         merged["max_retry_count"] = max(0, min(int(merged.get("max_retry_count") or 0), 10))
     except (TypeError, ValueError):
         merged["max_retry_count"] = 0
-    if merged.get("model") not in _MODELS_BY_ID:
-        merged["model"] = DEFAULT_SETTINGS["model"]
+    normalized_model = normalize_model_id(merged.get("model"))
+    if normalized_model != merged.get("model"):
+        merged["model"] = normalized_model
+        try:
+            save_settings(merged)
+        except OSError:
+            pass
     return merged
 
 
@@ -317,6 +391,9 @@ def save_settings(settings: dict[str, Any]) -> dict[str, Any]:
     ensure_dirs()
     merged = dict(DEFAULT_SETTINGS)
     merged.update({k: v for k, v in settings.items() if k in DEFAULT_SETTINGS})
+    merged["model"] = normalize_model_id(merged.get("model"))
+    if str(merged.get("base_url") or "").strip().rstrip("/") == LEGACY_DEFAULT_BASE_URL:
+        merged["base_url"] = DEFAULT_BASE_URL
     if not str(merged.get("base_url") or "").strip():
         merged["base_url"] = DEFAULT_BASE_URL
     if not str(merged.get("image_proxy_url") or "").strip():

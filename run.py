@@ -4,9 +4,13 @@ import json
 import os
 import shutil
 import socket
+import subprocess
 import sys
+import threading
+import time
 import webbrowser
 from pathlib import Path
+from urllib.request import ProxyHandler, build_opener
 
 import uvicorn
 
@@ -120,27 +124,119 @@ def check_python_version() -> None:
         sys.exit(1)
 
 
-def find_free_port(start: int = 8787, end: int = 8800) -> int:
+# ---- 单实例：清理残存的旧服务 ----
+#
+# 上一次的进程如果还活着（例如用户只关了浏览器，或关窗口没结束进程），旧服务会
+# 继续占着 8787。这时新进程会退到 8788，用户看到的却是旧界面，表现出来就是
+# "重启了却没生效"。所以启动前先探测端口：只有当端口上确实是本工具（首页带本
+# 工具特有的静态资源）时才结束它，不会误伤别的程序。
+
+_APP_MARKERS = (b"/app.js", b"/favicon.svg")
+_CREATE_NO_WINDOW = 0x08000000
+
+
+def _port_in_use(port: int, timeout: float = 0.4) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(timeout)
+        return sock.connect_ex(("127.0.0.1", port)) == 0
+
+
+def _looks_like_this_app(port: int, timeout: float = 0.8) -> bool:
+    """首页响应里同时出现本工具的标志性资源，才认定是本工具。"""
+    opener = build_opener(ProxyHandler({}))
+    try:
+        with opener.open(f"http://127.0.0.1:{port}/", timeout=timeout) as response:
+            if response.status != 200:
+                return False
+            body = response.read(65536)
+    except OSError:
+        return False
+    return all(marker in body for marker in _APP_MARKERS)
+
+
+def _stop_listener_on(port: int) -> int | None:
+    """结束监听该端口的进程并返回 PID（仅 Windows）。"""
+    script = (
+        f"$owner = (Get-NetTCPConnection -LocalPort {port} -State Listen "
+        "-ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty OwningProcess); "
+        "if ($owner) { Stop-Process -Id $owner -Force -ErrorAction Stop; $owner }"
+    )
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            creationflags=_CREATE_NO_WINDOW,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    lines = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
+    if result.returncode == 0 and lines and lines[-1].isdigit():
+        return int(lines[-1])
+    return None
+
+
+def stop_stale_instances(start: int = 8787, end: int = 8800) -> None:
+    """结束仍然占着本项目端口的旧实例，避免新旧服务同时存在。"""
+    if not sys.platform.startswith("win"):
+        return
     for port in range(start, end + 1):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            try:
-                sock.bind(("127.0.0.1", port))
-                return port
-            except OSError:
-                continue
+        if not _port_in_use(port):
+            continue
+        if not _looks_like_this_app(port):
+            print(f"[批量出图] 端口 {port} 已被其它程序占用，换端口")
+            continue
+        pid = _stop_listener_on(port)
+        if pid is None:
+            print(f"[批量出图] 端口 {port} 上的旧实例无法结束（可能权限不足）")
+        else:
+            print(f"[批量出图] 已结束残存的旧实例 PID {pid}（原占用端口 {port}）")
+    # 给操作系统一点时间回收端口
+    time.sleep(0.5)
+
+
+def find_free_port(start: int = 8787, end: int = 8800, attempts: int = 8) -> int:
+    for _ in range(attempts):
+        for port in range(start, end + 1):
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                try:
+                    sock.bind(("127.0.0.1", port))
+                    return port
+                except OSError:
+                    continue
+        time.sleep(0.4)
     raise RuntimeError("8787-8800 端口都被占用，请手动指定端口")
+
+
+def open_browser_when_ready(url: str, timeout: float = 10.0) -> None:
+    """Open the local UI only after the server is accepting requests.
+
+    Opening the browser before Uvicorn has bound its port can make Chromium show
+    a stale cached page from an earlier package.  The readiness probe bypasses
+    environment proxies so a system proxy cannot delay access to localhost.
+    """
+    opener = build_opener(ProxyHandler({}))
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with opener.open(url, timeout=0.5) as response:
+                if response.status == 200:
+                    webbrowser.open(url)
+                    return
+        except OSError:
+            pass
+        time.sleep(0.1)
 
 
 def main() -> None:
     check_python_version()
+    stop_stale_instances()
     port = find_free_port()
     url = f"http://127.0.0.1:{port}"
     print(f"批量出图服务启动: {url}")
-    try:
-        webbrowser.open(url)
-    except Exception:
-        pass
+    threading.Thread(target=open_browser_when_ready, args=(url,), daemon=True).start()
     # Use the object form so PyInstaller-frozen importlib can find it.
     from backend.main import app
     uvicorn.run(app, host="127.0.0.1", port=port, log_level="info")

@@ -12,12 +12,14 @@ from typing import Any, Literal
 
 from .api_client import NoovaApiError, NoovaClient, clip
 from .config import (
+    DEFAULT_MODEL_ID,
     JOBS_PATH,
     SCHEDULES_PATH,
     assert_safe_directory,
     assert_safe_file,
     ensure_dirs,
     get_model_poll_param,
+    get_model_poll_endpoint,
     get_model_poll_timeout_sec,
     load_settings,
 )
@@ -225,7 +227,7 @@ class BatchJob:
             id=str(data.get("id") or uuid.uuid4().hex[:12]),
             source_dir=str(data.get("source_dir") or ""),
             output_dir=str(data.get("output_dir") or ""),
-            model=str(data.get("model") or "gpt-image-2"),
+            model=str(data.get("model") or DEFAULT_MODEL_ID),
             aspect_ratio=str(data.get("aspect_ratio") or "1:1"),
             quality=str(data.get("quality") or "auto"),
             image_size=str(data.get("image_size") or ""),
@@ -634,7 +636,7 @@ class JobManager:
         settings = load_settings()
         global_source = str(payload.get("source_dir") or settings.get("source_dir") or "").strip()
         global_output = str(payload.get("output_dir") or settings.get("output_dir") or "").strip()
-        model = payload.get("model") or settings.get("model") or "gpt-image-2"
+        model = payload.get("model") or settings.get("model") or DEFAULT_MODEL_ID
         aspect_ratio = payload.get("aspect_ratio") or settings.get("aspect_ratio") or "1:1"
         quality = payload.get("quality") or settings.get("quality") or "auto"
         image_size = payload.get("image_size") or settings.get("image_size") or ""
@@ -845,7 +847,7 @@ class JobManager:
         try:
             client = NoovaClient(
                 api_key=str(settings.get("api_key") or ""),
-                base_url=str(settings.get("base_url") or "https://noova.cn"),
+                base_url=str(settings.get("base_url") or "https://noova.vip"),
                 image_proxy_url=str(settings.get("image_proxy_url") or ""),
             )
         except NoovaApiError as exc:
@@ -1113,6 +1115,7 @@ class JobManager:
                 cancel_check=cancel_check,
                 poll_timeout=poll_timeout,
                 poll_param=get_model_poll_param(job.model),
+                poll_endpoint=get_model_poll_endpoint(job.model),
             )
 
             if job.cancel_flag:

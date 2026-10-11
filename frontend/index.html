@@ -4,8 +4,9 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>批量出图</title>
-    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-    <link rel="stylesheet" href="/styles.css" />
+    <!-- 由后端注入构建指纹，避免新版本首次打开时复用旧包的静态资源缓存。 -->
+    <link rel="icon" href="/favicon.svg?v=%%ASSET_VERSION%%" type="image/svg+xml" />
+    <link rel="stylesheet" href="/styles.css?v=%%ASSET_VERSION%%" />
     <script>
       // 由后端在渲染首页时替换。跨域页面读不到本页内容，因此拿不到该令牌。
       window.__APP_TOKEN__ = "%%APP_TOKEN%%";
@@ -24,7 +25,7 @@
         }
       })();
     </script>
-    <script src="/lucide.min.js"></script>
+    <script src="/lucide.min.js?v=%%ASSET_VERSION%%"></script>
   </head>
   <body>
     <div class="app-shell">
@@ -102,6 +103,7 @@
             <label class="field compact">
               <span>模型</span>
               <select id="model"></select>
+              <span id="model-price-hint" class="field-hint"></span>
             </label>
 
             <label class="field compact narrow">
@@ -280,7 +282,7 @@
 
           <label class="field field-span-2">
             <span>API Base URL</span>
-            <input id="base-url" type="text" value="https://noova.cn" placeholder="https://noova.cn" />
+            <input id="base-url" type="text" value="https://noova.vip" placeholder="https://noova.vip" />
           </label>
 
           <label class="field field-span-2">
@@ -292,11 +294,7 @@
           <label class="field">
             <span>默认模型</span>
             <select id="settings-model"></select>
-          </label>
-
-          <label class="field">
-            <span>自定义默认模型</span>
-            <input id="settings-model-custom" type="text" placeholder="可选，优先于上方选择" />
+            <span id="settings-model-price-hint" class="field-hint"></span>
           </label>
 
           <label class="field">
@@ -387,7 +385,7 @@
       <div id="lightbox-caption" class="lightbox-caption"></div>
     </div>
 
-    <script src="/app.js"></script>
+    <script src="/app.js?v=%%ASSET_VERSION%%"></script>
     <script>
       window.refreshIcons = function refreshIcons() {
         if (window.lucide && typeof window.lucide.createIcons === "function") {

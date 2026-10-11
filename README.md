@@ -1,6 +1,76 @@
 # 批量出图工具
 
-当前版本：`v1.7.0`
+当前版本：`v1.9.0`
+
+## v1.9.0 更新内容
+
+- 移除旧模型 `gpt-image-2-G`，改用新模型集合。
+- 模型列表更新为 6 个：`GPT Image 2.5 sunburst`、`gpt-image-2.5-flare-1K`、
+  `GPT-Image-2-L`、`nano-banana-2`、`Nano Banana 2.1`、`nano-banana-pro`。
+- 按新文档校准每个模型的比例集合与 quality 支持：
+  - 三个 GPT Image 模型：支持 `quality`，比例含 `3:1` / `1:3`。
+  - `nano-banana-2` / `Nano Banana 2.1`：比例含 `1:4` / `4:1` / `1:8` / `8:1`，无 `quality`。
+  - `nano-banana-pro`：无 `quality`。
+- 修正创建任务的请求字段：上游要求蛇形 `aspect_ratio`（写 `aspectRatio` 会报
+  「缺少必需参数: 比例」）。GPT Image 系列必须传比例对应的像素尺寸
+  （如 `9:16` → `720x1280`），nano 系列直接传比例本身；界面始终展示比例。
+- `imageSize` 按模型区分：GPT Image 系列不发送（上游不需要），nano 系列必须传
+  `1K` / `2K` / `4K`；图像尺寸选择器只在 nano 系列可用。
+- 默认模型改为 `GPT Image 2.5 sunburst`；旧的 `gpt-image-2` 迁移到
+  `GPT Image 2.5 sunburst`，旧的 `gpt-image-2-G` 迁移到 `gpt-image-2.5-flare-1K`。
+- 结果解析兼容 `results` / `result` / `imageUrl`，任务 ID 兼容 `id` / `task_id`；
+  上游以 HTTP 200 + `error` 返回的校验失败会透出真实原因。
+- 启动时单实例化：探测 8787-8800，若端口上确实是本工具的旧实例就自动结束，
+  避免新旧两个服务同时存在、页面一直停留在旧版本。
+- 新增模型价格展示：通过 `GET /api/model-prices` 代理上游 `GET /api/models`，
+  把积分价格标注在模型下拉选项中（如 `GPT-Image-2-L（6积分/次）`），并在选择框
+  下方显示当前模型的实时价格；价格结果缓存 5 分钟，取不到时不影响模型选择。
+
+## v1.8.4 更新内容
+
+- 修复积分余额字段使用驼峰命名 `remainingTotal` 时页面不显示的问题。
+
+## v1.8.3 更新内容
+
+- 积分余额改为请求上游 `GET /api/v1/credit`，兼容直接或嵌套余额响应。
+- 手动刷新失败时在页面显示具体错误，不再静默无反应。
+
+## v1.8.2 更新内容
+
+- 默认 API Base URL 改为 `https://noova.vip`，已有旧默认地址会自动迁移。
+
+## v1.8.1 更新内容
+
+- 修正两个模型的统一创建入口为 `/api/v1/invoke`；异步结果仍通过 `/v1/content` 查询。
+
+## v1.8.0 更新内容
+
+- 模型列表仅保留 `gpt-image-2-G` 和 `GPT-Image-2-L`。
+- 两个模型统一使用 `/api/v1/gateway/invoke`、`referenceImages`、`aspectRatio`、`quality` 和 `/v1/content` 轮询协议。
+- 旧的 `gpt-image-2` 设置会自动迁移到 `GPT-Image-2-L`。
+
+## v1.7.5 更新内容
+
+- `gpt-image-2-G` 与 `GPT-Image-2-L` 使用统一的创建、参考图、比例、质量和异步轮询参数。
+- 异步查询改为 `/v1/content`，支持 `results` 直接返回图片 URL。
+
+## v1.7.4 更新内容
+
+- 增强图片读取兼容性，处理截断/轻微损坏的图片，避免 Pillow 解码异常直接中断任务。
+
+## v1.7.3 更新内容
+
+- 统一参考图字段为 `referenceImages`。
+
+## v1.7.2 更新内容
+
+- 两个 GPT Image 模型均发送 `prompt`、`model`、`aspectRatio`、`referenceImages`、`quality`，不再发送 `imageSize`。
+
+## v1.7.1 更新内容
+
+- 修复升级免安装包后首次打开仍可能显示旧界面的问题：前端资源按内容生成指纹并禁止缓存。
+- 启动器在本地服务可访问后才打开浏览器，并且就绪检测不受系统代理影响。
+- 清理未被界面调用的模型接口与辅助函数，保留全部现有交互和任务功能。
 
 ## v1.7.0 更新内容
 
@@ -65,12 +135,14 @@
 
 ## 支持模型
 
-当前仅保留以下四个模型：
+当前仅保留以下六个模型：
 
-- `gpt-image-2`
-- `gpt-image-2-G`
-- `nano-banana-2`
-- `nano-banana-pro`
+- `GPT Image 2.5 sunburst`（仅 1K，支持 quality）
+- `gpt-image-2.5-flare-1K`（仅 1K，支持 quality）
+- `GPT-Image-2-L`（仅 1K，支持 quality）
+- `nano-banana-2`（支持 1K/2K/4K）
+- `Nano Banana 2.1`（支持 1K/2K/4K）
+- `nano-banana-pro`（支持 1K/2K/4K）
 
 ## 快速开始（源码运行）
 
@@ -80,6 +152,9 @@
 python -m pip install -r requirements.txt
 python run.py
 ```
+
+Windows 也可以直接双击 `start.bat`：依赖已装好时不会再跑 pip，启动时会自动结束
+残存的本工具旧实例，保证页面加载的是最新代码。
 
 启动后浏览器访问控制台显示的地址，通常为 `http://127.0.0.1:8787`。首次使用请在“设置”中填写 Noova API Key 和 Base URL。
 

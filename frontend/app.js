@@ -1,10 +1,12 @@
 const state = {
   options: {
     models: [
-      { id: "gpt-image-2", name: "gpt-image-2", aspect_ratios: ["1:1","16:9","9:16","4:3","3:4","3:2","2:3","5:4","4:5","21:9","9:21","1:2","2:1"], image_sizes: [], supports_quality: true },
-      { id: "gpt-image-2-G", name: "gpt-image-2-G", aspect_ratios: ["auto","1:1","16:9","9:16","4:3","3:4","3:2","2:3","5:4","4:5","21:9","9:21","1:2","2:1"], image_sizes: ["1K"], supports_quality: true, poll_timeout_sec: 960 },
-      { id: "nano-banana-2", name: "nano-banana-2", aspect_ratios: ["auto","1:1","16:9","9:16","4:3","3:4","3:2","2:3","5:4","4:5","21:9","1:4","4:1","1:8","8:1"], image_sizes: ["1K","2K","4K"], supports_quality: false },
-      { id: "nano-banana-pro", name: "nano-banana-pro", aspect_ratios: ["auto","1:1","16:9","9:16","4:3","3:4","3:2","2:3","5:4","4:5","21:9"], image_sizes: ["1K","2K","4K"], supports_quality: false },
+      { id: "GPT Image 2.5 sunburst", name: "GPT Image 2.5 sunburst", aspect_ratios: ["auto","1:1","16:9","9:16","4:3","3:4","3:2","2:3","21:9","9:21","2:1","1:2","3:1","1:3"], image_sizes: [], supports_quality: true },
+      { id: "gpt-image-2.5-flare-1K", name: "gpt-image-2.5-flare-1K", aspect_ratios: ["auto","1:1","16:9","9:16","4:3","3:4","3:2","2:3","21:9","9:21","2:1","1:2","3:1","1:3"], image_sizes: [], supports_quality: true },
+      { id: "GPT-Image-2-L", name: "GPT-Image-2-L", aspect_ratios: ["auto","1:1","16:9","9:16","4:3","3:4","3:2","2:3","21:9","9:21","2:1","1:2","3:1","1:3"], image_sizes: [], supports_quality: true },
+      { id: "nano-banana-2", name: "nano-banana-2", aspect_ratios: ["auto","1:1","3:2","2:3","16:9","9:16","21:9","5:4","4:5","1:4","4:1","1:8","8:1","4:3","3:4"], image_sizes: ["1K","2K","4K"], supports_quality: false },
+      { id: "Nano Banana 2.1", name: "Nano Banana 2.1", aspect_ratios: ["auto","1:1","3:2","2:3","16:9","9:16","21:9","5:4","4:5","1:4","4:1","1:8","8:1","4:3","3:4"], image_sizes: ["1K","2K","4K"], supports_quality: false },
+      { id: "nano-banana-pro", name: "nano-banana-pro", aspect_ratios: ["auto","1:1","16:9","9:16","21:9","2:3","3:2","4:3","3:4","4:5","5:4"], image_sizes: ["1K","2K","4K"], supports_quality: false },
     ],
     qualities: ["auto", "low", "medium", "high"],
   },
@@ -21,14 +23,16 @@ const state = {
   lastJobSig: "",
   autoRetryFailed: false,
   maxRetryCount: 0,
+  modelPrices: {},
   currentScheduleId: null,
   scheduleTimer: null,
   schedulePollInFlight: false,
 };
 
 const THEME_STORAGE_KEY = "batch-image-theme";
-const DEFAULT_BASE_URL = "https://noova.cn";
+const DEFAULT_BASE_URL = "https://noova.vip";
 const DEFAULT_IMAGE_PROXY_URL = "https://imageproxy.zhongzhuan.chat/api/upload";
+const DEFAULT_MODEL = "GPT Image 2.5 sunburst";
 
 const RESULT_FILTERS = [
   { key: "all", label: "全部" },
@@ -44,6 +48,7 @@ const el = {
   sourceDir: document.getElementById("source-dir"),
   outputDir: document.getElementById("output-dir"),
   model: document.getElementById("model"),
+  modelPriceHint: document.getElementById("model-price-hint"),
   pollInterval: document.getElementById("poll-interval"),
   aspectRatio: document.getElementById("aspect-ratio"),
   quality: document.getElementById("quality"),
@@ -82,6 +87,7 @@ const el = {
   imageProxyUrl: document.getElementById("image-proxy-url"),
   settingsModel: document.getElementById("settings-model"),
   settingsModelCustom: document.getElementById("settings-model-custom"),
+  settingsModelPriceHint: document.getElementById("settings-model-price-hint"),
   settingsAspectRatio: document.getElementById("settings-aspect-ratio"),
   settingsQuality: document.getElementById("settings-quality"),
   settingsConcurrency: document.getElementById("settings-concurrency"),
@@ -205,12 +211,34 @@ function getModelInfo(modelId) {
   return models.find((m) => m.id === modelId) || models[0] || { id: modelId, aspect_ratios: ["1:1"], image_sizes: [], supports_quality: true };
 }
 
+function modelPriceText(modelId) {
+  const entry = state.modelPrices && state.modelPrices[modelId];
+  const text = entry && (entry.price_text || entry.priceText);
+  return typeof text === "string" ? text.trim() : "";
+}
+
+function modelPriceSuffix(modelId) {
+  const text = modelPriceText(modelId);
+  return text ? `（${text}）` : "";
+}
+
+function updateModelPriceHint(selectModelEl, modelId) {
+  const hint = selectModelEl === el.model
+    ? el.modelPriceHint
+    : (selectModelEl === el.settingsModel ? el.settingsModelPriceHint : null);
+  if (!hint) return;
+  const text = modelPriceText(modelId);
+  hint.textContent = text ? `当前价格：${text}` : "";
+}
+
 function updateModelDependentOptions(selectModelEl, selectRatioEl, selectSizeEl, currentRatio, currentSize, selectQualityEl) {
   const modelId = selectModelEl.value;
   const info = getModelInfo(modelId);
   const ratios = info.aspect_ratios || ["1:1"];
   const sizes = info.image_sizes || [];
   const supportsQuality = info.supports_quality !== false;
+
+  updateModelPriceHint(selectModelEl, modelId);
 
   // Show/hide quality dropdown based on model
   if (selectQualityEl) {
@@ -267,8 +295,10 @@ function fillSelect(select, values) {
       option.value = value;
       option.textContent = value;
     } else {
+      const suffix = modelPriceSuffix(value.id);
       option.value = value.id;
-      option.textContent = value.name;
+      option.textContent = value.name + suffix;
+      if (suffix) option.title = `${value.name} · ${modelPriceText(value.id)}`;
     }
     select.appendChild(option);
   });
@@ -804,6 +834,14 @@ async function loadOptions() {
     // keep defaults
   }
 
+  try {
+    const res = await api("/api/model-prices");
+    state.modelPrices = (res.data && res.data.prices) || {};
+  } catch (_) {
+    // 价格拿不到不影响模型选择，只是不显示标注
+    state.modelPrices = {};
+  }
+
   fillSelect(el.model, state.options.models);
   fillSelect(el.settingsModel, state.options.models);
   fillSelect(el.quality, state.options.qualities);
@@ -819,17 +857,17 @@ async function loadOptions() {
 }
 
 function selectedModel() {
-  return (el.model?.value || "gpt-image-2").trim();
+  return (el.model?.value || DEFAULT_MODEL).trim();
 }
 
 function selectedSettingsModel() {
   const custom = (el.settingsModelCustom?.value || "").trim();
   if (custom) return custom;
-  return (el.settingsModel?.value || "gpt-image-2").trim();
+  return (el.settingsModel?.value || DEFAULT_MODEL).trim();
 }
 
 function applyModelValue(selectEl, customEl, value) {
-  const model = (value || "gpt-image-2").trim();
+  const model = (value || DEFAULT_MODEL).trim();
   const options = Array.from(selectEl.options).map((opt) => opt.value);
   if (options.includes(model)) {
     selectEl.value = model;
@@ -889,7 +927,7 @@ async function loadSettings() {
   }
   el.baseUrl.value = s.base_url || DEFAULT_BASE_URL;
   if (el.imageProxyUrl) el.imageProxyUrl.value = s.image_proxy_url || DEFAULT_IMAGE_PROXY_URL;
-  applyModelValue(el.settingsModel, el.settingsModelCustom, s.model || "gpt-image-2");
+  applyModelValue(el.settingsModel, el.settingsModelCustom, s.model || DEFAULT_MODEL);
   el.settingsConcurrency.value = s.concurrency || 10;
   el.settingsPollInterval.value = s.poll_interval_sec || 20;
   el.settingsPollTimeout.value = s.poll_timeout_sec || 300;
@@ -906,10 +944,10 @@ async function loadSettings() {
   el.outputDir.value = s.output_dir || "";
 
   // Set model and trigger dependent option population
-  const savedModel = s.model || "gpt-image-2";
+  const savedModel = s.model || DEFAULT_MODEL;
   if (el.model) {
     const options = Array.from(el.model.options).map((opt) => opt.value);
-    el.model.value = options.includes(savedModel) ? savedModel : (options[0] || "gpt-image-2");
+    el.model.value = options.includes(savedModel) ? savedModel : (options[0] || DEFAULT_MODEL);
   }
   if (el.aspectRatio && el.imageSize) {
     updateModelDependentOptions(el.model, el.aspectRatio, el.imageSize, s.aspect_ratio || "9:16", s.image_size || "", el.quality);
@@ -1397,19 +1435,25 @@ function renderJob(job) {
   }
 }
 
-async function fetchCredit() {
+async function fetchCredit(showError = false) {
   const badge = el.creditBadge;
   const valueEl = el.creditValue;
   badge.classList.add("loading");
   try {
     const resp = await api("/api/credit");
-    if (resp && resp.data) {
-      valueEl.textContent = Number(resp.data.remaining_total).toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const source = resp && resp.data;
+    const rawValue = source && typeof source === "object"
+      ? (source.remainingTotal ?? source.remaining_total ?? source.remaining ?? source.balance ?? source.credit ?? source.total)
+      : source;
+    const numericValue = Number(rawValue);
+    if (Number.isFinite(numericValue)) {
+      valueEl.textContent = numericValue.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     } else {
       valueEl.textContent = "--";
     }
   } catch (err) {
     valueEl.textContent = "--";
+    if (showError) setActionMessage(`积分刷新失败：${err.message || err}`, true);
   } finally {
     badge.classList.remove("loading");
   }
@@ -1550,7 +1594,7 @@ function bindEvents() {
       setActionMessage(err.message || String(err), true);
     }
   });
-  document.getElementById("btn-refresh-credit").addEventListener("click", async () => { try { await fetchCredit(); } catch (_) {} });
+  document.getElementById("btn-refresh-credit").addEventListener("click", async () => { await fetchCredit(true); });
   document.getElementById("btn-refresh-job").addEventListener("click", async () => {
     try {
       await refreshJob();

@@ -12,7 +12,7 @@ import httpx
 
 from .config import (
     get_model_endpoint,
-    get_model_image_param,
+    get_model_info,
     model_supports_quality,
     validate_external_http_url,
 )
@@ -72,7 +72,7 @@ class NoovaApiError(RuntimeError):
 
 
 class NoovaClient:
-    def __init__(self, api_key: str, base_url: str = "https://noova.cn", timeout: float = 900.0, image_proxy_url: str = ""):
+    def __init__(self, api_key: str, base_url: str = "https://noova.vip", timeout: float = 900.0, image_proxy_url: str = ""):
         if not api_key or not api_key.strip():
             raise NoovaApiError("\u8bf7\u5148\u5728\u8bbe\u7f6e\u4e2d\u586b\u5199 API Key")
         self.api_key = api_key.strip()
@@ -183,33 +183,56 @@ class NoovaClient:
 
         Mirrors the old encode_image_base64 behavior (max 2048px, JPEG q85),
         but returns raw bytes so they can be PUT to object storage directly.
-        Falls back to the raw file bytes when PIL is unavailable."""
+        Truncated images are allowed when Pillow can still decode them.  If a
+        decoder cannot read an otherwise supported file, keep the original
+        bytes as a last-resort upload so the upstream service can decide
+        whether it can repair/accept the image instead of crashing locally.
+        """
         if not file_path.exists() or not file_path.is_file():
             raise NoovaApiError(f"\u6587\u4ef6\u4e0d\u5b58\u5728: {file_path}")
 
         try:
-            from PIL import Image
-        except ImportError:
-            return file_path.read_bytes(), mimetypes.guess_type(file_path.name)[0] or "image/png"
+            raw_bytes = file_path.read_bytes()
+        except OSError as exc:
+            raise NoovaApiError(f"\u8bfb\u53d6\u56fe\u7247\u5931\u8d25: {file_path}") from exc
+        if not raw_bytes:
+            raise NoovaApiError(f"\u56fe\u7247\u6587\u4ef6\u4e3a\u7a7a: {file_path.name}")
+        raw_content_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
 
-        img = Image.open(file_path)
-        if img.mode not in ("RGB", "RGBA"):
-            img = img.convert("RGB")
-        w, h = img.size
-        if max(w, h) > MAX_IMAGE_DIM:
-            ratio = MAX_IMAGE_DIM / max(w, h)
-            img = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
-        # JPEG has no alpha: flatten RGBA -> RGB to avoid save errors
-        if img.mode == "RGBA":
-            img = img.convert("RGB")
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=85)
-        return buf.getvalue(), "image/jpeg"
+        try:
+            from PIL import Image, ImageFile
+        except ImportError:
+            return raw_bytes, raw_content_type
+
+        previous_truncated_setting = ImageFile.LOAD_TRUNCATED_IMAGES
+        ImageFile.LOAD_TRUNCATED_IMAGES = True
+        try:
+            with Image.open(file_path) as source:
+                source.load()
+                img = source
+                if img.mode not in ("RGB", "RGBA"):
+                    img = img.convert("RGB")
+                w, h = img.size
+                if max(w, h) > MAX_IMAGE_DIM:
+                    ratio = MAX_IMAGE_DIM / max(w, h)
+                    img = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
+                # JPEG has no alpha: flatten RGBA -> RGB to avoid save errors
+                if img.mode == "RGBA":
+                    img = img.convert("RGB")
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG", quality=85)
+                return buf.getvalue(), "image/jpeg"
+        except (OSError, ValueError):
+            # Some camera/export tools leave a recoverable trailing stream or
+            # metadata block.  Preserve the original bytes for the proxy/API.
+            return raw_bytes, raw_content_type
+        finally:
+            ImageFile.LOAD_TRUNCATED_IMAGES = previous_truncated_setting
 
     def encode_image_base64(self, file_path: Path) -> str:
-        """Fallback: encode image as base64 string (no data: prefix)."""
-        data, _ = self._prepare_image_bytes(file_path)
-        return base64.b64encode(data).decode("utf-8")
+        """Fallback: encode image as a complete data URL."""
+        data, content_type = self._prepare_image_bytes(file_path)
+        return f"data:{content_type};base64," + base64.b64encode(data).decode("utf-8")
 
     async def upload_image_direct(self, file_path: Path) -> str:
         """Upload an image to the configured image proxy (multipart/form-data)
@@ -222,10 +245,11 @@ class NoovaClient:
         Falls back to a data: URL when no image_proxy_url is configured.
         """
         if not self.image_proxy_url:
-            return "data:image/jpeg;base64," + self.encode_image_base64(file_path)
+            return self.encode_image_base64(file_path)
 
         data, content_type = self._prepare_image_bytes(file_path)
-        ext = "jpg" if content_type == "image/jpeg" else "png"
+        extension = mimetypes.guess_extension(content_type) or ".bin"
+        ext = extension.lstrip(".")
         filename = f"{file_path.stem or 'image'}_{uuid.uuid4().hex[:8]}.{ext}"
 
         owns_client = self._client is None
@@ -292,20 +316,29 @@ class NoovaClient:
     ) -> str:
         """Create a draw task.
         urls: list of image URLs (from upload_image_direct) OR data: URLs/base64.
-        Endpoint, image field, and quality support are model-specific and
-        resolved from backend.config."""
-        image_param = get_model_image_param(model)
+        Endpoint and request-field names are model-specific and resolved from
+        backend.config."""
+        model_info = get_model_info(model)
         endpoint = get_model_endpoint(model)
+        # GPT 系列要传比例对应的像素尺寸（如 9:16 -> 720x1280），nano 系列直接传比例。
+        # 界面始终展示比例，换算只发生在请求体里。
+        aspect_ratio_value = (
+            (model_info.get("aspect_ratio_values") or {}).get(aspect_ratio)
+            or (model_info.get("aspect_ratio_aliases") or {}).get(aspect_ratio)
+            or aspect_ratio
+        )
         body: dict[str, Any] = {
-            "model": model,
             "prompt": prompt,
-            "aspectRatio": aspect_ratio,
-            "imageSize": image_size,
+            str(model_info.get("aspect_ratio_param") or "aspect_ratio"): aspect_ratio_value,
         }
+        if model_info.get("include_model", True):
+            body["model"] = str(model_info.get("api_model") or model)
+        if model_info.get("include_image_size", True):
+            body["imageSize"] = image_size
         if urls:
-            body[image_param] = urls
+            body[str(model_info.get("image_param") or "urls")] = urls
         if model_supports_quality(model):
-            body["quality"] = quality or "auto"
+            body[str(model_info.get("quality_param") or "quality")] = quality or "auto"
 
         # Retry up to 5 times for timeout/connection errors
         last_exc = None
@@ -330,12 +363,26 @@ class NoovaClient:
         data = self._unwrap(payload)
         task_id: str | None = None
         if isinstance(data, dict):
-            task_id = data.get("id")
+            task_id = data.get("id") or data.get("task_id")
         if not task_id:
             # Try response level
             if isinstance(payload, dict):
-                task_id = payload.get("id")
+                task_id = payload.get("id") or payload.get("task_id")
         if not task_id:
+            # 上游把校验失败写在 error/message 里并以 HTTP 200 返回，这里要透出真实原因
+            detail = ""
+            for source in (data, payload):
+                if isinstance(source, dict):
+                    detail = str(
+                        source.get("error")
+                        or source.get("message")
+                        or source.get("msg")
+                        or ""
+                    ).strip()
+                    if detail:
+                        break
+            if detail:
+                raise NoovaApiError(f"创建任务失败: {clip(detail)}", payload=payload)
             raise NoovaApiError(f"\u672a\u8fd4\u56de\u4efb\u52a1 ID: {clip(payload)}")
         return str(task_id)
 
@@ -348,12 +395,13 @@ class NoovaClient:
         cancel_check=None,
         poll_timeout: float = 300.0,
         poll_param: str = "id",
+        poll_endpoint: str = "/v1/draw/result",
     ) -> dict[str, Any]:
         """Poll until task completes, fails, or poll_timeout elapses.
         cancel_check: optional async/await callable returning True to abort.
         poll_timeout: max wall-clock seconds to wait (default 300)."""
         import asyncio
-        poll_url = f"/v1/draw/result"
+        poll_url = poll_endpoint
         deadline = asyncio.get_event_loop().time() + max(1.0, poll_timeout)
         first_round = True
         while asyncio.get_event_loop().time() < deadline:
@@ -462,17 +510,29 @@ class NoovaClient:
     @staticmethod
     def get_succeeded_url(result: dict[str, Any]) -> str | None:
         """Extract the first result URL from a succeeded poll response.
-        Noova returns: {"data": {"results": [{"url": "https://..."}]}}"""
+        Noova returns: {"data": {"results": [{"url": "https://..."}]}}
+        兼容 results 为字符串/列表，以及 result / imageUrl 便捷字段。"""
         data = result if isinstance(result, dict) else {}
         if "data" in data:
             data = data["data"]
         if not isinstance(data, dict):
             return None
         results = data.get("results")
+        if isinstance(results, str) and results:
+            return results
         if isinstance(results, list) and results:
             first = results[0]
             if isinstance(first, dict):
-                return first.get("url")
+                for key in ("url", "content"):
+                    value = first.get(key)
+                    if isinstance(value, str) and value:
+                        return value
+            elif isinstance(first, str) and first:
+                return first
+        for key in ("result", "imageUrl"):
+            value = data.get(key)
+            if isinstance(value, str) and value:
+                return value
         return None
 
     @staticmethod

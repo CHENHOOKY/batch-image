@@ -4,7 +4,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-from .config import get_model_info, validate_external_http_url
+from .config import ALL_ASPECT_RATIOS, get_model_info, validate_external_http_url
 
 
 class SettingsUpdate(BaseModel):
@@ -47,12 +47,7 @@ class SettingsUpdate(BaseModel):
         if value is None or not value.strip():
             return value
         cleaned = value.strip()
-        allowed = {
-            "auto", "1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3",
-            "5:4", "4:5", "21:9", "9:21", "1:2", "2:1", "1:4", "4:1",
-            "1:8", "8:1",
-        }
-        if cleaned not in allowed:
+        if cleaned not in ALL_ASPECT_RATIOS:
             raise ValueError("不支持的图片比例")
         return cleaned
 
@@ -147,12 +142,7 @@ class BatchJobCreate(BaseModel):
         if value is None or not value.strip():
             return value
         cleaned = value.strip()
-        allowed = {
-            "auto", "1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3",
-            "5:4", "4:5", "21:9", "9:21", "1:2", "2:1", "1:4", "4:1",
-            "1:8", "8:1",
-        }
-        if cleaned not in allowed:
+        if cleaned not in ALL_ASPECT_RATIOS:
             raise ValueError("不支持的图片比例")
         return cleaned
 

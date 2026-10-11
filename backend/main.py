@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import asyncio
+import hashlib
 import time
 import uuid
 from pathlib import Path
@@ -26,8 +27,17 @@ from .security import APP_TOKEN, HostGuardMiddleware, TokenAuthMiddleware
 
 ensure_dirs()
 
-app = FastAPI(title="批量出图", version="1.7.0")
+app = FastAPI(title="批量出图", version="1.9.0")
 frontend_dir = BASE_DIR / "frontend"
+
+# 静态资源只允许按白名单访问。资源 URL 会带上内容指纹，避免浏览器在新包首次
+# 启动时复用同一个 127.0.0.1 地址下旧版本的 JS/CSS 缓存。
+_STATIC_FILES: dict[str, str] = {
+    "styles.css": "text/css; charset=utf-8",
+    "app.js": "application/javascript; charset=utf-8",
+    "lucide.min.js": "application/javascript; charset=utf-8",
+    "favicon.svg": "image/svg+xml",
+}
 
 # 中间件按添加顺序的逆序执行：先校验 Host（阻断 DNS rebinding），再校验令牌。
 app.add_middleware(TokenAuthMiddleware, token=APP_TOKEN)
@@ -191,7 +201,7 @@ async def _run_file_picker(session_id: str, title: str, initial: str) -> None:
 
 @app.get("/api/health")
 async def health() -> dict[str, Any]:
-    return {"ok": True, "service": "batch-image", "version": "1.7.0"}
+    return {"ok": True, "service": "batch-image", "version": "1.9.0"}
 
 
 @app.get("/api/settings")
@@ -213,14 +223,123 @@ async def update_settings(body: SettingsUpdate) -> ApiResponse:
     return ApiResponse(message="设置已保存", data=public_settings(current))
 
 
-@app.get("/api/models")
-async def list_models() -> ApiResponse:
-    return ApiResponse(data=MODELS)
-
-
 @app.get("/api/options")
 async def list_options() -> ApiResponse:
     return ApiResponse(data={"models": MODELS})
+
+
+# --- 模型价格（代理上游公开模型列表） ---
+
+#: 价格变动不频繁，缓存一小段时间，避免每次打开页面都请求上游
+_PRICE_CACHE_TTL = 300.0
+_price_cache: dict[str, Any] = {"at": 0.0, "prices": None}
+
+
+def _format_number(value: Any) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if number.is_integer():
+        return str(int(number))
+    return f"{number:g}"
+
+
+def _price_display_text(entry: dict[str, Any]) -> str:
+    """把上游结构化价格字段拼成一句展示文案。"""
+    manual = entry.get("priceDisplayText")
+    if isinstance(manual, str) and manual.strip():
+        return manual.strip()
+
+    per_second = entry.get("priceSecond")
+    if per_second is not None:
+        seconds = _format_number(per_second)
+        if seconds:
+            return f"{seconds}积分/秒"
+
+    price_type = str(entry.get("priceType") or "")
+    if price_type == "per_request":
+        once = _format_number(entry.get("priceOnce"))
+        if once:
+            return f"{once}积分/次"
+    if price_type == "per_token":
+        token = entry.get("priceToken")
+        if isinstance(token, dict):
+            return "按 token 计费"
+    return ""
+
+
+@app.get("/api/model-prices")
+async def get_model_prices() -> ApiResponse:
+    """查询上游 GET /api/models，返回按模型编码索引的积分价格。"""
+    import httpx
+
+    now = time.monotonic()
+    cached = _price_cache.get("prices")
+    if isinstance(cached, dict) and now - float(_price_cache.get("at") or 0) < _PRICE_CACHE_TTL:
+        return ApiResponse(message="获取模型价格成功（缓存）", data={"prices": cached})
+
+    settings = load_settings()
+    try:
+        base_url = validate_external_http_url(
+            str(settings.get("base_url") or "https://noova.vip"),
+            field_name="API Base URL",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    api_key = str(settings.get("api_key") or "").strip()
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=15.0, read=30.0, write=30.0, pool=15.0),
+            follow_redirects=False,
+            trust_env=False,
+        ) as client:
+            resp = await client.get(f"{base_url}/api/models", headers=headers)
+            if 300 <= resp.status_code < 400:
+                raise HTTPException(status_code=502, detail="模型列表服务发生重定向，请检查 API Base URL")
+            payload = resp.json()
+    except httpx.ConnectError as exc:
+        raise HTTPException(status_code=502, detail="无法连接到模型列表服务，请检查网络") from exc
+    except httpx.TimeoutException as exc:
+        raise HTTPException(status_code=504, detail="模型列表接口请求超时") from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"请求模型列表接口失败: {exc}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail=f"模型列表返回格式异常: {exc}") from exc
+
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=502, detail="模型列表返回结构异常")
+    if resp.status_code != 200:
+        message = payload.get("message") or payload.get("msg") or f"模型列表接口返回 {resp.status_code}"
+        raise HTTPException(status_code=resp.status_code, detail=str(message))
+
+    entries = payload.get("data")
+    if not isinstance(entries, list):
+        raise HTTPException(status_code=502, detail="模型列表返回结构异常")
+
+    prices: dict[str, dict[str, Any]] = {}
+    for item in entries:
+        if not isinstance(item, dict):
+            continue
+        model_id = str(item.get("model") or "").strip()
+        if not model_id:
+            continue
+        prices[model_id] = {
+            "model_type": item.get("modelType"),
+            "status": item.get("status"),
+            "price_text": _price_display_text(item),
+            "price_once": item.get("priceOnce"),
+            "price_type": item.get("priceType"),
+            "price_second": item.get("priceSecond"),
+            "price_display_text": item.get("priceDisplayText"),
+        }
+
+    _price_cache["prices"] = prices
+    _price_cache["at"] = now
+    return ApiResponse(message="获取模型价格成功", data={"prices": prices})
 
 
 @app.post("/api/folder/scan")
@@ -335,7 +454,7 @@ async def test_connection() -> ApiResponse:
     try:
         async with NoovaClient(
             api_key=str(settings.get("api_key") or ""),
-            base_url=str(settings.get("base_url") or "https://noova.cn"),
+            base_url=str(settings.get("base_url") or "https://noova.vip"),
             image_proxy_url=str(settings.get("image_proxy_url") or ""),
         ) as client:
             await client.verify_connection()
@@ -434,7 +553,7 @@ async def get_credit() -> ApiResponse:
     api_key = str(settings.get("api_key") or "").strip()
     try:
         base_url = validate_external_http_url(
-            str(settings.get("base_url") or "https://noova.cn"),
+            str(settings.get("base_url") or "https://noova.vip"),
             field_name="API Base URL",
         )
     except ValueError as exc:
@@ -450,7 +569,7 @@ async def get_credit() -> ApiResponse:
             trust_env=False,
         ) as client:
             resp = await client.get(
-                f"{base_url}/api/v1/gateway/credit",
+                f"{base_url}/api/v1/credit",
                 headers={"Authorization": f"Bearer {api_key}"},
             )
             if 300 <= resp.status_code < 400:
@@ -473,7 +592,12 @@ async def get_credit() -> ApiResponse:
         msg = data.get("message") or f"积分接口返回 {resp.status_code}"
         raise HTTPException(status_code=resp.status_code, detail=str(msg))
 
-    return ApiResponse(message=str(data.get("message") or "获取积分成功"), data=data.get("data"))
+    credit_data = data.get("data")
+    if credit_data is None:
+        # Some deployments return the balance object directly instead of
+        # wrapping it in a data property.
+        credit_data = data
+    return ApiResponse(message=str(data.get("message") or "获取积分成功"), data=credit_data)
 
 
 @app.delete("/api/jobs/{job_id}")
@@ -493,6 +617,20 @@ async def delete_job(job_id: str) -> ApiResponse:
 # 因此无法拿到令牌，也就无法伪造任何 /api/ 请求。
 
 _TOKEN_PLACEHOLDER = "%%APP_TOKEN%%"
+_ASSET_VERSION_PLACEHOLDER = "%%ASSET_VERSION%%"
+
+
+def _asset_version() -> str:
+    """Return a stable fingerprint for the frontend files bundled with this app."""
+    digest = hashlib.sha256()
+    for name in _STATIC_FILES:
+        try:
+            digest.update((frontend_dir / name).read_bytes())
+        except OSError:
+            # The normal route will return a useful 404 for a missing asset.  Keep
+            # rendering the index so that error is not hidden behind a server 500.
+            digest.update(name.encode("utf-8"))
+    return digest.hexdigest()[:12]
 
 
 def _render_index() -> str:
@@ -505,7 +643,10 @@ def _render_index() -> str:
             1,
         )
         return html
-    return html.replace(_TOKEN_PLACEHOLDER, APP_TOKEN)
+    return (
+        html.replace(_TOKEN_PLACEHOLDER, APP_TOKEN)
+        .replace(_ASSET_VERSION_PLACEHOLDER, _asset_version())
+    )
 
 
 @app.get("/")
@@ -528,17 +669,6 @@ async def index_html() -> HTMLResponse:
     return await index()
 
 
-#: 静态资源白名单。不再用 StaticFiles 挂载整个目录：那样 //index.html、
-#: /index.html/ 之类的路径会绕过上面的渲染路由，把没替换令牌的原始页面发出去，
-#: 用户会看到一个所有请求都 401 的界面且刷新无效。
-_STATIC_FILES: dict[str, str] = {
-    "styles.css": "text/css; charset=utf-8",
-    "app.js": "application/javascript; charset=utf-8",
-    "lucide.min.js": "application/javascript; charset=utf-8",
-    "favicon.svg": "image/svg+xml",
-}
-
-
 @app.get("/{asset}")
 async def static_asset(asset: str) -> FileResponse:
     media_type = _STATIC_FILES.get(asset)
@@ -547,4 +677,10 @@ async def static_asset(asset: str) -> FileResponse:
     target = frontend_dir / asset
     if not target.is_file():
         raise HTTPException(status_code=404, detail="资源不存在")
-    return FileResponse(target, media_type=media_type)
+    return FileResponse(
+        target,
+        media_type=media_type,
+        # The fingerprint handles cross-version caching.  no-store also protects
+        # users upgrading from older packages that referenced bare /app.js paths.
+        headers={"Cache-Control": "no-store, max-age=0"},
+    )
